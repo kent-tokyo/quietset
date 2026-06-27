@@ -1,0 +1,18 @@
+[package]
+name = "quietset"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Filter datasets by label stability across evaluators, budgets, seeds, and models"
+repository = "https://github.com/kent-tokyo/quietset"
+homepage = "https://github.com/kent-tokyo/quietset"
+keywords = ["dataset", "label", "stability", "filtering", "evaluation"]
+categories = ["science", "command-line-utilities", "algorithms"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+thiserror = "1"
+indexmap = "2"
+ordered-float = "4"

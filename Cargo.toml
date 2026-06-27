@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/quietset", "crates/quietset-cli"]
+resolver = "2"

@@ -1,0 +1,6 @@
+{"sample_id":"p","label":"yes","score":0.95}
+{"sample_id":"p","label":"yes","score":0.94}
+{"sample_id":"p","label":"yes","score":0.96}
+{"sample_id":"q","label":"no","score":0.05}
+{"sample_id":"q","label":"no","score":0.04}
+{"sample_id":"q","label":"no","score":0.06}

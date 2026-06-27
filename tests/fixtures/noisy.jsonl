@@ -1,0 +1,6 @@
+{"sample_id":"x","label":"A","score":0.9}
+{"sample_id":"x","label":"B","score":0.1}
+{"sample_id":"x","label":"A","score":0.5}
+{"sample_id":"y","label":"C","score":0.2}
+{"sample_id":"y","label":"D","score":0.8}
+{"sample_id":"y","label":"C","score":0.3}
