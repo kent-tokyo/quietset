@@ -1,19 +1,50 @@
 # quietset
 
-quietset filters datasets by label stability, not by task-specific assumptions.
+[![CI](https://github.com/kent-tokyo/quietset/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/quietset/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/quietset.svg)](https://crates.io/crates/quietset)
+[![docs.rs](https://docs.rs/quietset/badge.svg)](https://docs.rs/quietset)
 
-It helps you keep samples whose labels or scores remain stable across evaluators,
-budgets, random seeds, model checkpoints, or repeated runs.
-
-It is useful for noisy supervision, synthetic data filtering, reinforcement
-learning, search-based labeling, simulation, and benchmark curation.
+A model-agnostic stability filter — keeps samples whose labels or scores remain
+consistent across evaluators, budgets, seeds, and model checkpoints.
 
 quietset is not a model trainer, annotation platform, or image-quality auditor.
 It is a small stability-filtering primitive designed to compose with other tools.
 
 > **Note:** quietset measures *stability*, not *correctness*. A sample can score high
 > because evaluators consistently agree on a wrong answer. Use `gold_label`-based
-> reliability or `--use-lcb-score` to add evidence-based conservatism.
+> reliability or `--decision-score lcb` to add evidence-based conservatism.
+
+## Use cases
+
+### Game AI / search training data
+
+Multiple engines, depths, or seeds evaluate the same position. Keep only positions
+where the evaluation is stable — consistent labels and scores regardless of search parameters.
+
+```bash
+quietset score positions.jsonl --profile game-ai > stable_positions.jsonl
+quietset stable-wrong-risk positions.jsonl  # flag positions stable evaluators consistently mis-label
+```
+
+### LLM judge pipelines
+
+Multiple judge models or prompts evaluate the same response. Keep only responses
+where judges consistently agree, using Wilson LCB to guard against low-n flukes.
+
+```bash
+quietset score judge_evals.jsonl --profile llm-judge > reliable_evals.jsonl
+quietset calibrate judge_evals.jsonl --target-precision 0.95 --decision-score lcb
+```
+
+### Synthetic / simulation data
+
+Scores or rewards vary across seeds, budgets, or model checkpoints. Keep samples
+whose quality signal is robust to these variations.
+
+```bash
+quietset score runs.jsonl --profile simulation > robust_samples.jsonl
+quietset audit robust_samples.jsonl --json | jq '.seed_sensitive[:5]'
+```
 
 ## Installation
 
@@ -103,6 +134,22 @@ quietset compare before.jsonl after.jsonl --policy-after lcb
 quietset calibrate input.jsonl --target-precision 0.95
 quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 ```
+
+## Command reference
+
+| Command | Input | What it does |
+|---------|-------|-------------|
+| `score` | observation JSONL/CSV | Compute per-sample stability scores and decisions |
+| `filter` | scored JSONL | Keep samples by stability, decision, LCB, confidence, or dispersion |
+| `summary` | scored JSONL | Aggregate statistics; `lcb_keep_demotions`; `--json` for CI |
+| `explain` | scored JSONL | Per-sample component breakdown with visual bars |
+| `compare` | 2 scored JSONL | Before/after transition matrix, regressions, component deltas, policy comparison |
+| `reliability` | observation JSONL | Per-evaluator reliability, confusion matrix, Fleiss kappa, Krippendorff alpha |
+| `audit` | scored JSONL | Deep diagnostic report: borderline, LCB risk, sensitivity lists |
+| `select` | scored JSONL | Extract samples by class for human review queues (pipeable) |
+| `recommend` | scored JSONL | Per-sample re-evaluation suggestions with reasons |
+| `stable-wrong-risk` | observation JSONL | Rate of stably-wrong kept samples (requires `gold_label`) |
+| `calibrate` | observation JSONL | Find keep_threshold meeting a precision/coverage target |
 
 ## Input JSONL format
 
@@ -198,8 +245,12 @@ Each sub-score is also exposed in `components` so you can see why a sample was s
 }
 ```
 
-Use `--weight-*` flags to emphasise dimensions relevant to your pipeline, or use `--profile` to
-apply a preset:
+Use `--weight-*` flags to tune individual dimensions, or use `--profile` (see [Profiles](#profiles)).
+
+## Profiles
+
+Apply a use-case preset with `--profile` instead of tuning weights manually. Explicit
+`--weight-*` and `--decision-score` flags always override the preset.
 
 | Profile | Weight changes | Default decision-score |
 |---------|---------------|----------------------|
@@ -207,8 +258,6 @@ apply a preset:
 | `simulation` | budget ×2, seed ×2 | `adjusted` |
 | `game-ai` | budget ×2, seed ×1.5; min-observations 3 | `adjusted` |
 | `benchmark` | label ×2, evaluator ×1.5 | `raw` |
-
-Explicit `--weight-*` and `--decision-score` flags always override the preset.
 
 ```bash
 # LLM judge preset (equivalent to --weight-evaluators 2 --weight-models 2 --decision-score lcb)
@@ -423,6 +472,9 @@ Records that lack the filtered field (e.g. `label_agreement_lcb` is absent when 
 provided) are excluded by `--min-*` filters and included by `--max-*` filters.
 
 ## reliability command (experimental)
+
+> Stability measures agreement, not correctness. Use `stable-wrong-risk` to quantify how many
+> of your kept samples are consistently wrong — the most dangerous failure mode in stability-filtered datasets.
 
 Estimate per-evaluator reliability from observation JSONL:
 
