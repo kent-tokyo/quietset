@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-06-28
+
+### Added
+- `select` command — extracts samples by diagnostic class (borderline, high-disagreement, budget-sensitive, seed-sensitive, high-raw-low-lcb, high-score-mad); outputs original JSONL lines unchanged (pipeable); `--top N`; borderline band is `keep_threshold ± 0.10` (was hardcoded [0.75, 0.95])
+- `recommend` command — emits one JSONL line per sample with a re-evaluation suggestion; priority-ordered rules: high_raw_low_lcb → add_observations, low_evaluator_agreement → add_evaluators, high_seed_sensitivity → add_seeds, high_budget_sensitivity → increase_budget, low_model_agreement → add_models; `--unstable-only` to skip clean keeps
+- `stable-wrong-risk` command — scores observation JSONL internally; reports `stable_wrong_rate_among_keep` (kept samples where majority_label ≠ gold_label); requires `gold_label`; JSON output with per-sample list
+- `compare --policy-after raw|adjusted|lcb` — second transition matrix showing how after-file decisions would change under an alternative policy; `--policy-keep-threshold`, `--policy-drop-threshold`
+- `audit --observations <file>` — optional observation JSONL input; adds `fleiss_kappa` and `krippendorff_alpha` to `--json` output and `dataset agreement:` section to text output
+
+### Fixed
+- `audit` borderline band now uses `keep_threshold ± 0.10` (respecting `--keep-threshold` flag) instead of hardcoded [0.75, 0.95]
+
 ## 0.5.0 — 2026-06-28
 
 ### Added

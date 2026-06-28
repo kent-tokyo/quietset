@@ -84,6 +84,20 @@ quietset compare before.jsonl after.jsonl --components
 # Deep diagnostic audit report
 quietset audit scored.jsonl
 quietset audit scored.jsonl --json | jq '.high_raw_low_lcb'
+quietset audit scored.jsonl --json --observations input.jsonl | jq '{fleiss_kappa,krippendorff_alpha}'
+
+# Extract samples by diagnostic class for human review
+quietset select scored.jsonl --class borderline --top 50
+quietset select scored.jsonl --class high-raw-low-lcb > uncertain_keeps.jsonl
+
+# Get re-evaluation recommendations
+quietset recommend scored.jsonl
+
+# Compute risk of stably-wrong kept samples
+quietset stable-wrong-risk input.jsonl
+
+# Compare with hypothetical policy applied to after file
+quietset compare before.jsonl after.jsonl --policy-after lcb
 
 # Calibrate keep_threshold from gold labels to meet a precision target
 quietset calibrate input.jsonl --target-precision 0.95
@@ -517,6 +531,101 @@ sample. Returns an error if no threshold meets the target (try a lower `--target
 > **Note:** calibrate cannot separate stable-correct from stable-wrong samples — if a sample
 > consistently gets the wrong label, its `stability_score` is indistinguishable from a correct
 > sample. Use `gold_label`-based `reliability` diagnostics to identify systematically wrong evaluators.
+
+## select command
+
+Extract samples by diagnostic class, outputting the original scored JSONL lines (pass-through,
+pipeable to other commands):
+
+```bash
+quietset select scored.jsonl --class borderline --top 100
+quietset select scored.jsonl --class high-raw-low-lcb > uncertain_keeps.jsonl
+quietset select scored.jsonl --class budget-sensitive --top 20 | quietset explain - --sample-id x
+```
+
+| Class | Selects |
+|-------|---------|
+| `borderline` | `keep_threshold ± 0.10` stability band (uncertainty zone) |
+| `high-disagreement` | sorted by `disagreement_score` descending |
+| `budget-sensitive` | sorted by `budget_sensitivity` descending |
+| `seed-sensitive` | sorted by `seed_sensitivity` descending |
+| `high-raw-low-lcb` | `stability_score >= keep_threshold` but `label_agreement_lcb < keep_threshold` |
+| `high-score-mad` | sorted by `score_mad` descending |
+
+Use `--top N` to limit output. Use `--keep-threshold` to adjust the band for `borderline` and
+`high-raw-low-lcb` (default 0.85).
+
+## recommend command
+
+Emit a re-evaluation suggestion for each sample that has a detectable issue, in priority order:
+
+```bash
+quietset recommend scored.jsonl
+quietset recommend scored.jsonl --unstable-only   # skip clean keeps
+```
+
+```json
+{"sample_id": "x42", "reason": "high_raw_low_lcb", "recommended_action": "add_observations", "stability_score": 0.91, "label_agreement_lcb": 0.34, "n_observations": 2}
+{"sample_id": "y17", "reason": "high_seed_sensitivity", "recommended_action": "add_seeds", "seed_sensitivity": 0.71}
+```
+
+| Reason | Action |
+|--------|--------|
+| `high_raw_low_lcb` | LCB below threshold despite high raw stability → `add_observations` |
+| `low_evaluator_agreement` | evaluator_agreement < 0.7 → `add_evaluators` |
+| `high_seed_sensitivity` | seed_sensitivity > 0.3 → `add_seeds` |
+| `high_budget_sensitivity` | budget_sensitivity > 0.3 → `increase_budget` |
+| `low_model_agreement` | model_agreement < 0.7 → `add_models` |
+
+Each sample emits at most one recommendation (highest priority rule wins).
+
+## stable-wrong-risk command
+
+Scores observation JSONL internally and reports kept samples whose `majority_label` differs from
+`gold_label`:
+
+```bash
+quietset stable-wrong-risk input.jsonl
+quietset stable-wrong-risk input.jsonl --keep-threshold 0.90
+```
+
+```json
+{
+  "n_total": 1000,
+  "n_keep": 621,
+  "n_stable_wrong": 12,
+  "stable_wrong_rate_among_keep": 0.019,
+  "samples": [
+    {"sample_id": "x42", "stability_score": 0.96, "majority_label": "loss", "gold_label": "win"}
+  ]
+}
+```
+
+Requires `gold_label` on observations. Sorted by `stability_score` descending — the most
+confidently-kept wrong samples appear first. Use `--top N` to limit the sample list.
+
+## compare --policy-after
+
+After the standard comparison output, show how decisions in the after file would change under
+a hypothetical decision-score policy:
+
+```bash
+quietset compare before.jsonl after.jsonl --policy-after lcb
+quietset compare before.jsonl after.jsonl --policy-after adjusted --policy-keep-threshold 0.80
+```
+
+```
+policy comparison: current → lcb (keep_threshold=0.85):
+              →keep   →review    →drop
+    keep↓         0       850        0
+  review↓         0      2291      300
+    drop↓         0         0      200
+  demoted by policy: 850  promoted: 0
+```
+
+> **Note:** `--policy-after lcb` uses `label_agreement_lcb` as a proxy for the LCB policy score.
+> Other components are not recomputed, so results are approximate. Use for directional signal
+> ("how many keeps would be demoted"), not precise prediction.
 
 ## Rust API
 

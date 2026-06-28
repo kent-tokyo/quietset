@@ -1253,9 +1253,11 @@ fn run_audit(args: AuditArgs) -> Result<()> {
     let mut drivers: Vec<(&str, usize)> = driver_counts.into_iter().collect();
     drivers.sort_by_key(|d| Reverse(d.1));
 
+    let borderline_lo = (args.keep_threshold - 0.10).max(0.0);
+    let borderline_hi = (args.keep_threshold + 0.10).min(1.0);
     let mut borderline: Vec<&StabilityReport> = reports
         .iter()
-        .filter(|r| r.stability_score >= 0.75 && r.stability_score <= 0.95)
+        .filter(|r| (borderline_lo..=borderline_hi).contains(&r.stability_score))
         .collect();
     borderline.sort_by(|a, b| {
         a.stability_score
@@ -1387,7 +1389,9 @@ fn run_audit(args: AuditArgs) -> Result<()> {
     if !borderline.is_empty() {
         println!();
         println!(
-            "--- borderline (0.75 <= stability <= 0.95, top {}) ---",
+            "--- borderline ({:.2} <= stability <= {:.2}, top {}) ---",
+            borderline_lo,
+            borderline_hi,
             borderline.len().min(top)
         );
         for r in borderline.iter().take(top) {
@@ -1502,9 +1506,11 @@ fn run_select(args: SelectArgs) -> Result<()> {
 
     match args.class {
         SelectClass::Borderline => {
+            let lo = (kt - 0.10).max(0.0);
+            let hi = (kt + 0.10).min(1.0);
             indices.retain(|&i| {
                 let s = lines_and_reports[i].1.stability_score;
-                (0.75..=0.95).contains(&s)
+                (lo..=hi).contains(&s)
             });
             indices.sort_by(|&a, &b| {
                 lines_and_reports[a]
