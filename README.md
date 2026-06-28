@@ -189,8 +189,9 @@ By default, decisions use `stability_score`. With `--use-adjusted-score`, decisi
 `adjusted_stability_score` instead. `MinRequirements` are always applied **after** the
 threshold comparison and cannot be overridden by either score mode.
 
+| Condition | Decision |
+|-----------|----------|
 | score >= 0.85 | keep |
-|---------------|------|
 | score <= 0.40 | drop |
 | otherwise | review |
 
