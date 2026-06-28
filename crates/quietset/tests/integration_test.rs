@@ -1,6 +1,7 @@
 use quietset::{
     Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights, Thresholds,
-    compute_evaluator_reliability, parse_jsonl, score_all,
+    compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha, parse_jsonl,
+    score_all,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -826,4 +827,78 @@ fn test_lcb_keep_demotions_excludes_already_unstable() {
         is_demotion(&report_b),
         "sample_b should be a demotion candidate"
     );
+}
+
+#[test]
+fn test_fleiss_kappa_perfect_agreement() {
+    // 3 raters, 3 subjects, all agree → kappa = 1.0
+    let jsonl = r#"{"sample_id":"a","label":"yes","evaluator_id":"e1"}
+{"sample_id":"a","label":"yes","evaluator_id":"e2"}
+{"sample_id":"a","label":"yes","evaluator_id":"e3"}
+{"sample_id":"b","label":"no","evaluator_id":"e1"}
+{"sample_id":"b","label":"no","evaluator_id":"e2"}
+{"sample_id":"b","label":"no","evaluator_id":"e3"}
+{"sample_id":"c","label":"yes","evaluator_id":"e1"}
+{"sample_id":"c","label":"yes","evaluator_id":"e2"}
+{"sample_id":"c","label":"yes","evaluator_id":"e3"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let k = compute_fleiss_kappa(&obs).expect("should compute kappa");
+    assert!(
+        (k - 1.0).abs() < 1e-9,
+        "perfect agreement → kappa=1.0, got {k:.6}"
+    );
+}
+
+#[test]
+fn test_fleiss_kappa_perfect_disagreement() {
+    // 2 raters always disagree → P_obs=0, P_e=0.5 → kappa = (0-0.5)/(1-0.5) = -1.0
+    let jsonl = r#"{"sample_id":"a","label":"yes","evaluator_id":"e1"}
+{"sample_id":"a","label":"no","evaluator_id":"e2"}
+{"sample_id":"b","label":"yes","evaluator_id":"e1"}
+{"sample_id":"b","label":"no","evaluator_id":"e2"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let k = compute_fleiss_kappa(&obs).expect("should compute kappa");
+    assert!(
+        (k + 1.0).abs() < 1e-9,
+        "perfect disagreement → kappa=-1.0, got {k:.6}"
+    );
+}
+
+#[test]
+fn test_krippendorff_alpha_perfect_agreement() {
+    let jsonl = r#"{"sample_id":"a","label":"win","evaluator_id":"e1"}
+{"sample_id":"a","label":"win","evaluator_id":"e2"}
+{"sample_id":"b","label":"loss","evaluator_id":"e1"}
+{"sample_id":"b","label":"loss","evaluator_id":"e2"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let a = compute_krippendorff_alpha(&obs).expect("should compute alpha");
+    assert!(
+        (a - 1.0).abs() < 1e-9,
+        "perfect agreement → alpha=1.0, got {a:.6}"
+    );
+}
+
+#[test]
+fn test_krippendorff_alpha_perfect_disagreement() {
+    // 2 raters always disagree → Do=1, De=2/3 → alpha = 1 - 1/(2/3) = -0.5
+    let jsonl = r#"{"sample_id":"a","label":"yes","evaluator_id":"e1"}
+{"sample_id":"a","label":"no","evaluator_id":"e2"}
+{"sample_id":"b","label":"yes","evaluator_id":"e1"}
+{"sample_id":"b","label":"no","evaluator_id":"e2"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let a = compute_krippendorff_alpha(&obs).expect("should compute alpha");
+    assert!(
+        (a + 0.5).abs() < 1e-9,
+        "perfect disagreement → alpha=-0.5, got {a:.6}"
+    );
+}
+
+#[test]
+fn test_kappa_and_alpha_undefined_for_single_rater() {
+    // Only one rating per subject — undefined
+    let jsonl = r#"{"sample_id":"a","label":"yes","evaluator_id":"e1"}
+{"sample_id":"b","label":"no","evaluator_id":"e1"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    assert!(compute_fleiss_kappa(&obs).is_none());
+    assert!(compute_krippendorff_alpha(&obs).is_none());
 }

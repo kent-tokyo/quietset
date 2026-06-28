@@ -25,7 +25,7 @@ pub use decision::Thresholds;
 pub use error::{Error, Result};
 pub use metrics::{
     DecisionScore, MinRequirements, ScoreConfig, ScoreWeights, compute_evaluator_reliability,
-    compute_report, score_all,
+    compute_fleiss_kappa, compute_krippendorff_alpha, compute_report, score_all,
 };
 pub use observation::{Observation, parse_csv, parse_jsonl};
 pub use schema::{Decision, StabilityComponents, StabilityReport};

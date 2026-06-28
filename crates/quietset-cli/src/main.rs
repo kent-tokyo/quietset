@@ -9,7 +9,8 @@ use std::collections::HashMap;
 
 use quietset::{
     Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights,
-    StabilityReport, Thresholds, compute_evaluator_reliability, parse_csv, parse_jsonl, score_all,
+    StabilityReport, Thresholds, compute_evaluator_reliability, compute_fleiss_kappa,
+    compute_krippendorff_alpha, parse_csv, parse_jsonl, score_all,
 };
 
 #[derive(Parser)]
@@ -878,6 +879,18 @@ fn run_reliability(args: ReliabilityArgs) -> Result<()> {
     for (eval_id, r) in &sorted {
         let line = serde_json::json!({ "evaluator_id": eval_id, "reliability": r });
         println!("{}", serde_json::to_string(&line)?);
+    }
+    let kappa = compute_fleiss_kappa(&observations);
+    let alpha = compute_krippendorff_alpha(&observations);
+    if kappa.is_some() || alpha.is_some() {
+        let mut summary = serde_json::Map::new();
+        if let Some(k) = kappa {
+            summary.insert("fleiss_kappa".into(), serde_json::json!(k));
+        }
+        if let Some(a) = alpha {
+            summary.insert("krippendorff_alpha".into(), serde_json::json!(a));
+        }
+        println!("{}", serde_json::to_string(&summary)?);
     }
     Ok(())
 }
