@@ -185,10 +185,13 @@ quietset score input.jsonl \
 
 ## Decisions
 
-| threshold | decision |
-|-----------|----------|
-| `stability_score >= 0.85` | keep |
-| `stability_score <= 0.40` | drop |
+By default, decisions use `stability_score`. With `--use-adjusted-score`, decisions use
+`adjusted_stability_score` instead. `MinRequirements` are always applied **after** the
+threshold comparison and cannot be overridden by either score mode.
+
+| score >= 0.85 | keep |
+|---------------|------|
+| score <= 0.40 | drop |
 | otherwise | review |
 
 Configurable via `--keep-threshold` and `--drop-threshold`.
@@ -219,6 +222,10 @@ components:
 ```
 
 Add `--json` to get the full `StabilityReport` as JSON.
+
+> **Note**: this example uses the default raw-score decision mode (`stability_score = 0.97 → keep`).
+> With `--use-adjusted-score` (confidence ≈ 0.50 at n=3), `adjusted_score = 0.74` falls below the
+> keep threshold — the decision would be **review** unless `--keep-threshold` is lowered.
 
 ## compare command
 

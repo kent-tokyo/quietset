@@ -184,10 +184,13 @@ quietset score input.jsonl \
 
 ## 判定（decision）
 
-| 条件 | 判定 |
-|------|------|
-| `stability_score >= 0.85` | `keep`（採用） |
-| `stability_score <= 0.40` | `drop`（除外） |
+デフォルトでは `stability_score` が判定に使われます。`--use-adjusted-score` を指定すると
+`adjusted_stability_score` が使われます。`MinRequirements` はどちらのモードでも
+閾値判定の**後に**適用され、上書きされることはありません。
+
+| スコア >= 0.85 | `keep`（採用） |
+|---------------|--------------|
+| スコア <= 0.40 | `drop`（除外） |
 | それ以外 | `review`（要確認） |
 
 `--keep-threshold` と `--drop-threshold` で閾値を変更できます。
@@ -218,6 +221,10 @@ components:
 ```
 
 `--json` フラグで `StabilityReport` の JSON をそのまま出力できます。
+
+> **注意**: この例はデフォルトの raw スコア判定モードです（`stability_score = 0.97 → keep`）。
+> `--use-adjusted-score` を使うと、n=3 での confidence ≈ 0.50 により `adjusted_score = 0.74` となり、
+> `--keep-threshold` を下げない限り判定は **review** になります。
 
 ## compare コマンド
 
