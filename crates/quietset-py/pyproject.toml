@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "quietset"
+requires-python = ">=3.8"
+description = "Filter datasets by label stability"
+license = { text = "MIT OR Apache-2.0" }
+keywords = ["dataset", "label", "stability", "filtering"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "quietset"

@@ -1,0 +1,9 @@
+{"sample_id":"pos_001","label":"win","score":0.87,"budget":100,"seed":42,"run_id":"r1"}
+{"sample_id":"pos_001","label":"win","score":0.84,"budget":200,"seed":42,"run_id":"r2"}
+{"sample_id":"pos_001","label":"win","score":0.89,"budget":400,"seed":42,"run_id":"r3"}
+{"sample_id":"pos_002","label":"loss","score":-0.72,"budget":100,"seed":42,"run_id":"r1"}
+{"sample_id":"pos_002","label":"loss","score":-0.68,"budget":200,"seed":42,"run_id":"r2"}
+{"sample_id":"pos_002","label":"loss","score":-0.75,"budget":400,"seed":42,"run_id":"r3"}
+{"sample_id":"pos_003","label":"win","score":0.55,"budget":100,"seed":42,"run_id":"r1"}
+{"sample_id":"pos_003","label":"loss","score":-0.12,"budget":200,"seed":99,"run_id":"r2"}
+{"sample_id":"pos_003","label":"win","score":0.48,"budget":400,"seed":42,"run_id":"r3"}

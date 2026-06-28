@@ -1,0 +1,9 @@
+{"sample_id":"q1","label":"correct","score":0.95,"evaluator_id":"gpt4","model_id":"gpt-4o","seed":1}
+{"sample_id":"q1","label":"correct","score":0.92,"evaluator_id":"claude","model_id":"claude-3-5-sonnet","seed":1}
+{"sample_id":"q1","label":"correct","score":0.94,"evaluator_id":"gemini","model_id":"gemini-1.5-pro","seed":1}
+{"sample_id":"q2","label":"incorrect","score":0.12,"evaluator_id":"gpt4","model_id":"gpt-4o","seed":1}
+{"sample_id":"q2","label":"correct","score":0.61,"evaluator_id":"claude","model_id":"claude-3-5-sonnet","seed":1}
+{"sample_id":"q2","label":"incorrect","score":0.18,"evaluator_id":"gemini","model_id":"gemini-1.5-pro","seed":1}
+{"sample_id":"q3","label":"correct","score":0.88,"evaluator_id":"gpt4","model_id":"gpt-4o","seed":1}
+{"sample_id":"q3","label":"correct","score":0.83,"evaluator_id":"claude","model_id":"claude-3-5-sonnet","seed":1}
+{"sample_id":"q3","label":"incorrect","score":0.45,"evaluator_id":"gemini","model_id":"gemini-1.5-pro","seed":1}
