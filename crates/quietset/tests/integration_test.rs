@@ -1,4 +1,6 @@
-use quietset::{Decision, ScoreConfig, ScoreWeights, Thresholds, parse_jsonl, score_all};
+use quietset::{
+    Decision, Observation, ScoreConfig, ScoreWeights, Thresholds, parse_jsonl, score_all,
+};
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
     let path = format!("../../tests/fixtures/{}", filename);
@@ -342,5 +344,94 @@ fn test_components_populated() {
     .flatten()
     {
         assert!((0.0..=1.0).contains(&v), "component {v} out of [0,1]");
+    }
+}
+
+#[test]
+fn test_negative_weight_is_error() {
+    let config = ScoreConfig {
+        weights: ScoreWeights {
+            label_agreement: -1.0,
+            ..ScoreWeights::default()
+        },
+        ..ScoreConfig::default()
+    };
+    let err = config.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("label_agreement"),
+        "error should mention field: {err}"
+    );
+}
+
+#[test]
+fn test_nan_weight_is_error() {
+    let config = ScoreConfig {
+        weights: ScoreWeights {
+            score_stability: f64::NAN,
+            ..ScoreWeights::default()
+        },
+        ..ScoreConfig::default()
+    };
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn test_all_zero_weights_is_error() {
+    let config = ScoreConfig {
+        weights: ScoreWeights {
+            label_agreement: 0.0,
+            score_stability: 0.0,
+            budget_stability: 0.0,
+            seed_stability: 0.0,
+            model_agreement: 0.0,
+            evaluator_agreement: 0.0,
+        },
+        ..ScoreConfig::default()
+    };
+    let err = config.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("zero"),
+        "error should mention zero weights: {err}"
+    );
+}
+
+#[test]
+fn test_validate_rejects_empty_sample_id() {
+    let obs = Observation {
+        sample_id: "".into(),
+        ..Default::default()
+    };
+    let err = obs.validate(1).unwrap_err().to_string();
+    assert!(
+        err.contains("sample_id"),
+        "error should mention sample_id: {err}"
+    );
+
+    let obs_ws = Observation {
+        sample_id: "   ".into(),
+        ..Default::default()
+    };
+    assert!(
+        obs_ws.validate(1).is_err(),
+        "whitespace-only sample_id should fail"
+    );
+}
+
+#[test]
+fn test_weakest_component_tie_is_deterministic() {
+    use quietset::StabilityComponents;
+    let c = StabilityComponents {
+        label: Some(0.5),
+        score_consistency: Some(0.5),
+        budget_robustness: Some(0.5),
+        seed_robustness: Some(0.5),
+        model_agreement: Some(0.5),
+        evaluator_agreement: Some(0.5),
+    };
+    // tie resolved by fixed declaration order — "label" always wins
+    for _ in 0..20 {
+        let (name, val) = c.weakest().unwrap();
+        assert_eq!(name, "label");
+        assert_eq!(val, 0.5);
     }
 }

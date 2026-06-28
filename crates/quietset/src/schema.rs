@@ -50,6 +50,10 @@ pub struct StabilityComponents {
 
 impl StabilityComponents {
     /// Returns the name and value of the weakest (lowest) component, if any exist.
+    ///
+    /// Ties are resolved by the fixed component declaration order:
+    /// `label` → `score_consistency` → `budget_robustness` → `seed_robustness`
+    /// → `model_agreement` → `evaluator_agreement`.
     pub fn weakest(&self) -> Option<(&'static str, f64)> {
         let candidates = [
             ("label", self.label),

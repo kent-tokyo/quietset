@@ -8,8 +8,8 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use quietset::{
-    Decision, ScoreConfig, ScoreWeights, StabilityReport, Thresholds, parse_csv, parse_jsonl,
-    score_all,
+    Decision, Observation, ScoreConfig, ScoreWeights, StabilityReport, Thresholds, parse_csv,
+    parse_jsonl, score_all,
 };
 
 #[derive(Parser)]
@@ -179,8 +179,15 @@ fn write_csv_reports<W: Write>(reports: &[StabilityReport], writer: W) -> Result
         "disagreement_score",
         "stability_score",
         "decision",
+        "component_label",
+        "component_score_consistency",
+        "component_budget_robustness",
+        "component_seed_robustness",
+        "component_model_agreement",
+        "component_evaluator_agreement",
     ])?;
     for r in reports {
+        let c = &r.components;
         wtr.write_record([
             r.sample_id.as_str(),
             &r.n_observations.to_string(),
@@ -206,6 +213,22 @@ fn write_csv_reports<W: Write>(reports: &[StabilityReport], writer: W) -> Result
             &format!("{:.6}", r.disagreement_score),
             &format!("{:.6}", r.stability_score),
             &r.decision.to_string(),
+            &c.label.map(|v| format!("{v:.6}")).unwrap_or_default(),
+            &c.score_consistency
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+            &c.budget_robustness
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+            &c.seed_robustness
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+            &c.model_agreement
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+            &c.evaluator_agreement
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
         ])?;
     }
     wtr.flush()?;
@@ -232,8 +255,11 @@ fn run_score(args: ScoreArgs) -> Result<()> {
                     if line.is_empty() {
                         continue;
                     }
-                    match serde_json::from_str(line) {
-                        Ok(o) => obs.push(o),
+                    match serde_json::from_str::<Observation>(line) {
+                        Ok(o) => match o.validate(i + 1) {
+                            Ok(()) => obs.push(o),
+                            Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+                        },
                         Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
                     }
                 }

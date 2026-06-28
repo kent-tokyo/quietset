@@ -83,6 +83,29 @@ impl ScoreConfig {
                 t.drop, t.keep
             )));
         }
+        let w = &self.weights;
+        for (name, value) in [
+            ("label_agreement", w.label_agreement),
+            ("score_stability", w.score_stability),
+            ("budget_stability", w.budget_stability),
+            ("seed_stability", w.seed_stability),
+            ("model_agreement", w.model_agreement),
+            ("evaluator_agreement", w.evaluator_agreement),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(crate::error::Error::InvalidWeight { name, value });
+            }
+        }
+        if w.label_agreement
+            + w.score_stability
+            + w.budget_stability
+            + w.seed_stability
+            + w.model_agreement
+            + w.evaluator_agreement
+            == 0.0
+        {
+            return Err(crate::error::Error::AllWeightsZero);
+        }
         Ok(())
     }
 }

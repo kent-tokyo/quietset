@@ -12,6 +12,10 @@ pub enum Error {
     InvalidScoreScale(f64),
     #[error("invalid threshold: {0}")]
     InvalidThreshold(String),
+    #[error("invalid weight for '{name}': must be finite and >= 0.0, got {value}")]
+    InvalidWeight { name: &'static str, value: f64 },
+    #[error("all stability_score weights are zero; at least one must be > 0.0")]
+    AllWeightsZero,
     #[error("unsupported format: {0}")]
     UnsupportedFormat(String),
     #[error("could not parse JSONL at line {line}: {source}")]

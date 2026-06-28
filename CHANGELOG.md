@@ -4,6 +4,19 @@
 
 ### Added
 
+- `Observation::validate(line)` — shared validation method; called by `parse_jsonl`, `parse_csv`, and the CLI `--skip-invalid` JSONL path
+- `Error::InvalidWeight` — returned when a `ScoreWeights` field is negative, NaN, or infinite
+- `Error::AllWeightsZero` — returned when all weights sum to zero
+- CSV output now includes `component_label`, `component_score_consistency`, `component_budget_robustness`, `component_seed_robustness`, `component_model_agreement`, `component_evaluator_agreement` columns
+
+### Fixed
+
+- `--skip-invalid` JSONL path now calls `Observation::validate()` — empty `sample_id`, non-finite `score`, and non-finite `budget` are skipped with a warning instead of silently accepted
+- `ScoreConfig::validate()` now checks each `ScoreWeights` field (must be finite and >= 0.0) and rejects all-zero weight configs
+- `StabilityComponents::weakest()` tie policy documented: fixed declaration order (`label` → `score_consistency` → ... → `evaluator_agreement`)
+
+
+
 - `StabilityComponents` struct — per-dimension sub-scores (`label`, `score_consistency`, `budget_robustness`, `seed_robustness`, `model_agreement`, `evaluator_agreement`) now appear in every `StabilityReport` under the `components` key
 - `StabilityComponents::weakest()` — returns the lowest-scoring component for instability diagnosis
 - `quietset summary` CLI command — prints aggregate stats (sample counts, stability percentiles, top instability drivers) for a scored JSONL file

@@ -26,6 +26,22 @@ pub struct Observation {
     pub run_id: Option<String>,
 }
 
+impl Observation {
+    /// Validate required and numeric fields. `line` is reported in error messages.
+    pub fn validate(&self, line: usize) -> crate::error::Result<()> {
+        if self.sample_id.trim().is_empty() {
+            return Err(crate::error::Error::MissingField("sample_id"));
+        }
+        if self.score.is_some_and(|s| !s.is_finite()) {
+            return Err(crate::error::Error::InvalidScore { line });
+        }
+        if self.budget.is_some_and(|b| !b.is_finite()) {
+            return Err(crate::error::Error::InvalidBudget { line });
+        }
+        Ok(())
+    }
+}
+
 /// Parse observations from a JSONL string, returning typed errors with line numbers.
 pub fn parse_jsonl(input: &str) -> crate::error::Result<Vec<Observation>> {
     let mut out = Vec::new();
@@ -39,15 +55,7 @@ pub fn parse_jsonl(input: &str) -> crate::error::Result<Vec<Observation>> {
                 line: i + 1,
                 source,
             })?;
-        if obs.sample_id.trim().is_empty() {
-            return Err(crate::error::Error::MissingField("sample_id"));
-        }
-        if obs.score.is_some_and(|s| !s.is_finite()) {
-            return Err(crate::error::Error::InvalidScore { line: i + 1 });
-        }
-        if obs.budget.is_some_and(|b| !b.is_finite()) {
-            return Err(crate::error::Error::InvalidBudget { line: i + 1 });
-        }
+        obs.validate(i + 1)?;
         out.push(obs);
     }
     Ok(out)
@@ -59,15 +67,7 @@ pub fn parse_csv(input: &[u8]) -> crate::error::Result<Vec<Observation>> {
     let mut out = Vec::new();
     for (i, record) in rdr.deserialize::<Observation>().enumerate() {
         let obs = record?;
-        if obs.sample_id.trim().is_empty() {
-            return Err(crate::error::Error::MissingField("sample_id"));
-        }
-        if obs.score.is_some_and(|s| !s.is_finite()) {
-            return Err(crate::error::Error::InvalidScore { line: i + 1 });
-        }
-        if obs.budget.is_some_and(|b| !b.is_finite()) {
-            return Err(crate::error::Error::InvalidBudget { line: i + 1 });
-        }
+        obs.validate(i + 1)?;
         out.push(obs);
     }
     Ok(out)
