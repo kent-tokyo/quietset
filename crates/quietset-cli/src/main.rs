@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use quietset::{
-    parse_csv, parse_jsonl, score_all, Decision, ScoreConfig, StabilityReport, Thresholds,
+    parse_csv, parse_jsonl, score_all, Decision, ScoreConfig, ScoreWeights, StabilityReport,
+    Thresholds,
 };
 
 #[derive(Parser)]
@@ -41,7 +42,7 @@ struct ScoreArgs {
     #[arg(long, short)]
     output: Option<PathBuf>,
 
-    /// Scale for normalizing score_std and sensitivity metrics.
+    /// Scale for normalizing score_std and sensitivity metrics (must be > 0).
     #[arg(long, default_value_t = 1.0)]
     score_scale: f64,
 
@@ -56,6 +57,30 @@ struct ScoreArgs {
     /// Skip malformed lines instead of exiting with an error.
     #[arg(long)]
     skip_invalid: bool,
+
+    /// Weight for label_agreement in stability_score (0 = exclude).
+    #[arg(long, default_value_t = 1.0)]
+    weight_labels: f64,
+
+    /// Weight for score stability (1 - normalized_score_std) in stability_score.
+    #[arg(long, default_value_t = 1.0)]
+    weight_scores: f64,
+
+    /// Weight for budget stability (1 - budget_sensitivity) in stability_score.
+    #[arg(long, default_value_t = 1.0)]
+    weight_budget: f64,
+
+    /// Weight for seed stability (1 - seed_sensitivity) in stability_score.
+    #[arg(long, default_value_t = 1.0)]
+    weight_seed: f64,
+
+    /// Weight for model_agreement in stability_score.
+    #[arg(long, default_value_t = 1.0)]
+    weight_models: f64,
+
+    /// Weight for evaluator_agreement in stability_score.
+    #[arg(long, default_value_t = 1.0)]
+    weight_evaluators: f64,
 }
 
 #[derive(clap::Args)]
@@ -214,7 +239,16 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             keep: args.keep_threshold,
             drop: args.drop_threshold,
         },
+        weights: ScoreWeights {
+            label_agreement: args.weight_labels,
+            score_stability: args.weight_scores,
+            budget_stability: args.weight_budget,
+            seed_stability: args.weight_seed,
+            model_agreement: args.weight_models,
+            evaluator_agreement: args.weight_evaluators,
+        },
     };
+    config.validate().context("invalid configuration")?;
     let reports = score_all(observations, &config);
     let mut out = open_output(args.output.as_ref())?;
     match args.output_format {

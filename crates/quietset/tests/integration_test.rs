@@ -1,4 +1,4 @@
-use quietset::{parse_jsonl, score_all, Decision, ScoreConfig};
+use quietset::{parse_jsonl, score_all, Decision, ScoreConfig, ScoreWeights};
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
     let path = format!("../../tests/fixtures/{}", filename);
@@ -146,4 +146,94 @@ fn test_keep_review_drop_thresholds() {
     // boundaries
     assert_eq!(decide(0.85, &t), Decision::Keep);
     assert_eq!(decide(0.40, &t), Decision::Drop);
+}
+
+#[test]
+fn test_missing_sample_id_is_error() {
+    let err = parse_jsonl(r#"{}"#).unwrap_err().to_string();
+    assert!(
+        err.contains("sample_id"),
+        "error should mention sample_id: {err}"
+    );
+    assert!(parse_jsonl(r#"{"label":"x"}"#).is_err());
+}
+
+#[test]
+fn test_invalid_score_scale() {
+    let zero = ScoreConfig {
+        score_scale: 0.0,
+        ..ScoreConfig::default()
+    };
+    assert!(zero.validate().is_err());
+    let neg = ScoreConfig {
+        score_scale: -1.0,
+        ..ScoreConfig::default()
+    };
+    assert!(neg.validate().is_err());
+    let nan = ScoreConfig {
+        score_scale: f64::NAN,
+        ..ScoreConfig::default()
+    };
+    assert!(nan.validate().is_err());
+    assert!(ScoreConfig::default().validate().is_ok());
+}
+
+#[test]
+fn test_majority_label_tie_is_deterministic() {
+    // 1:1 tie between "alpha" and "beta" — alphabetically first should always win
+    let jsonl =
+        "{\"sample_id\":\"a\",\"label\":\"beta\"}\n{\"sample_id\":\"a\",\"label\":\"alpha\"}";
+    for _ in 0..20 {
+        let obs = parse_jsonl(jsonl).unwrap();
+        let reports = score_all(obs, &ScoreConfig::default());
+        assert_eq!(
+            reports[0].majority_label.as_deref(),
+            Some("alpha"),
+            "tie must resolve deterministically to 'alpha'"
+        );
+    }
+}
+
+#[test]
+fn test_seed_sensitivity_affects_score() {
+    // Same label, wildly different scores across seeds — should not be Keep
+    let jsonl = r#"{"sample_id":"a","label":"win","score":0.95,"seed":1}
+{"sample_id":"a","label":"win","score":0.05,"seed":2}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    assert!(reports[0].seed_sensitivity.is_some());
+    assert_ne!(
+        reports[0].decision,
+        Decision::Keep,
+        "seed-unstable sample should not be kept (stability={})",
+        reports[0].stability_score
+    );
+}
+
+#[test]
+fn test_score_weights_exclude_dimension() {
+    // Zero-weight a dimension and verify it doesn't affect the score
+    let jsonl = r#"{"sample_id":"a","label":"win","score":0.9}
+{"sample_id":"a","label":"win","score":0.1}"#;
+    let obs_default = parse_jsonl(jsonl).unwrap();
+    let obs_no_score = parse_jsonl(jsonl).unwrap();
+
+    let default_score = score_all(obs_default, &ScoreConfig::default())[0].stability_score;
+    let no_score_weight = score_all(
+        obs_no_score,
+        &ScoreConfig {
+            weights: ScoreWeights {
+                score_stability: 0.0,
+                ..ScoreWeights::default()
+            },
+            ..ScoreConfig::default()
+        },
+    )[0]
+    .stability_score;
+
+    // Excluding score dimension should raise the score (score is unstable here)
+    assert!(
+        no_score_weight > default_score,
+        "excluding unstable score dimension should raise stability_score"
+    );
 }

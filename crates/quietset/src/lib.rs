@@ -23,7 +23,7 @@ pub mod stream;
 
 pub use decision::Thresholds;
 pub use error::{Error, Result};
-pub use metrics::{compute_report, score_all, ScoreConfig};
+pub use metrics::{compute_report, score_all, ScoreConfig, ScoreWeights};
 pub use observation::{parse_csv, parse_jsonl, Observation};
 pub use schema::{Decision, StabilityReport};
 pub use stream::StreamingScorer;

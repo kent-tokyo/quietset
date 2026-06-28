@@ -4,6 +4,39 @@ use crate::schema::StabilityReport;
 use ordered_float::OrderedFloat;
 use std::collections::HashMap;
 
+/// Per-dimension weights for the `stability_score` weighted mean.
+///
+/// Set a weight to `0.0` to exclude that dimension from the score entirely.
+/// All weights default to `1.0` (equal weighting).
+#[derive(Debug, Clone)]
+pub struct ScoreWeights {
+    /// Weight for `label_agreement`.
+    pub label_agreement: f64,
+    /// Weight for score stability (`1 - normalized_score_std`).
+    pub score_stability: f64,
+    /// Weight for budget stability (`1 - budget_sensitivity`).
+    pub budget_stability: f64,
+    /// Weight for seed stability (`1 - seed_sensitivity`).
+    pub seed_stability: f64,
+    /// Weight for `model_agreement`.
+    pub model_agreement: f64,
+    /// Weight for `evaluator_agreement`.
+    pub evaluator_agreement: f64,
+}
+
+impl Default for ScoreWeights {
+    fn default() -> Self {
+        Self {
+            label_agreement: 1.0,
+            score_stability: 1.0,
+            budget_stability: 1.0,
+            seed_stability: 1.0,
+            model_agreement: 1.0,
+            evaluator_agreement: 1.0,
+        }
+    }
+}
+
 /// Configuration for [`score_all`] and [`compute_report`].
 pub struct ScoreConfig {
     /// Denominator for normalising `score_std` and sensitivity metrics into `[0.0, 1.0]`.
@@ -11,6 +44,8 @@ pub struct ScoreConfig {
     pub score_scale: f64,
     /// Thresholds that map `stability_score` to a [`crate::Decision`].
     pub thresholds: Thresholds,
+    /// Per-dimension weights for the `stability_score` weighted mean.
+    pub weights: ScoreWeights,
 }
 
 impl Default for ScoreConfig {
@@ -18,7 +53,18 @@ impl Default for ScoreConfig {
         Self {
             score_scale: 1.0,
             thresholds: Thresholds::default(),
+            weights: ScoreWeights::default(),
         }
+    }
+}
+
+impl ScoreConfig {
+    /// Validate this config, returning an error if `score_scale` is not positive and finite.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        if !self.score_scale.is_finite() || self.score_scale <= 0.0 {
+            return Err(crate::error::Error::InvalidScoreScale(self.score_scale));
+        }
+        Ok(())
     }
 }
 
@@ -28,6 +74,10 @@ pub fn compute_report(
     obs: &[Observation],
     config: &ScoreConfig,
 ) -> StabilityReport {
+    debug_assert!(
+        config.score_scale.is_finite() && config.score_scale > 0.0,
+        "score_scale must be positive and finite"
+    );
     let n = obs.len();
 
     // --- label stats ---
@@ -39,7 +89,11 @@ pub fn compute_report(
         for l in &labels {
             *counts.entry(l).or_insert(0) += 1;
         }
-        let (majority, count) = counts.into_iter().max_by_key(|(_, c)| *c).unwrap();
+        // Tiebreak: higher count wins; alphabetically first label wins on tie.
+        let (majority, count) = counts
+            .into_iter()
+            .max_by(|(l1, c1), (l2, c2)| c1.cmp(c2).then(l2.cmp(l1)))
+            .unwrap();
         (
             Some(majority.to_string()),
             Some(count as f64 / labels.len() as f64),
@@ -75,31 +129,44 @@ pub fn compute_report(
     let model_agreement = compute_group_label_agreement(obs, |o| o.model_id.as_deref());
     let evaluator_agreement = compute_group_label_agreement(obs, |o| o.evaluator_id.as_deref());
 
-    // --- stability_score ---
+    // --- stability_score (weighted mean of available sub-scores) ---
     // ponytail: single obs = low-confidence, always review
     let stability_score = if n == 1 {
         0.5
     } else {
-        let mut components: Vec<f64> = Vec::new();
+        let w = &config.weights;
+        let mut wsum = 0.0_f64;
+        let mut wtotal = 0.0_f64;
+
         if let Some(la) = label_agreement {
-            components.push(la);
+            wsum += la * w.label_agreement;
+            wtotal += w.label_agreement;
         }
         if let Some(std) = score_std {
-            components.push(1.0 - (std / config.score_scale).min(1.0));
+            wsum += (1.0 - (std / config.score_scale).min(1.0)) * w.score_stability;
+            wtotal += w.score_stability;
         }
         if let Some(bs) = budget_sensitivity {
-            components.push(1.0 - bs);
+            wsum += (1.0 - bs) * w.budget_stability;
+            wtotal += w.budget_stability;
+        }
+        if let Some(ss) = seed_sensitivity {
+            wsum += (1.0 - ss) * w.seed_stability;
+            wtotal += w.seed_stability;
         }
         if let Some(ma) = model_agreement {
-            components.push(ma);
+            wsum += ma * w.model_agreement;
+            wtotal += w.model_agreement;
         }
         if let Some(ea) = evaluator_agreement {
-            components.push(ea);
+            wsum += ea * w.evaluator_agreement;
+            wtotal += w.evaluator_agreement;
         }
-        if components.is_empty() {
-            0.5
+
+        if wtotal > 0.0 {
+            wsum / wtotal
         } else {
-            components.iter().sum::<f64>() / components.len() as f64
+            0.5
         }
     };
 
@@ -124,7 +191,7 @@ pub fn compute_report(
     }
 }
 
-/// Computes normalized range of per-group mean scores. Returns None if < 2 groups.
+/// Computes normalized range of per-group mean scores. Returns `None` if < 2 groups.
 fn compute_range_sensitivity<K, FK, FV>(
     obs: &[Observation],
     key_fn: FK,
@@ -155,7 +222,7 @@ where
 }
 
 /// Computes label agreement across unique group values (model or evaluator).
-/// Returns None if < 2 distinct groups have labels.
+/// Returns `None` if < 2 distinct groups have labels.
 fn compute_group_label_agreement<'a, F>(obs: &'a [Observation], group_fn: F) -> Option<f64>
 where
     F: Fn(&'a Observation) -> Option<&'a str>,
@@ -169,10 +236,16 @@ where
     if group_labels.len() < 2 {
         return None;
     }
-    // majority label per group
+    // Majority label per group; tiebreak: alphabetically first label wins.
     let majorities: Vec<&str> = group_labels
         .values()
-        .map(|counts| counts.iter().max_by_key(|(_, c)| *c).unwrap().0)
+        .map(|counts| {
+            counts
+                .iter()
+                .max_by(|(l1, c1), (l2, c2)| c1.cmp(c2).then(l2.cmp(l1)))
+                .unwrap()
+                .0
+        })
         .copied()
         .collect();
     let mut global: HashMap<&str, usize> = HashMap::new();
@@ -183,7 +256,7 @@ where
     Some(max_count as f64 / majorities.len() as f64)
 }
 
-/// Score all samples and return reports in sample_id insertion order.
+/// Score all samples and return reports in `sample_id` insertion order.
 pub fn score_all(observations: Vec<Observation>, config: &ScoreConfig) -> Vec<StabilityReport> {
     let groups = crate::group::group_by_sample_id(observations.into_iter());
     groups

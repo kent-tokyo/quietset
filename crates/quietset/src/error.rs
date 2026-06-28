@@ -6,6 +6,8 @@ pub enum Error {
     MissingField(&'static str),
     #[error("invalid score value at line {line}")]
     InvalidScore { line: usize },
+    #[error("score_scale must be positive and finite, got {0}")]
+    InvalidScoreScale(f64),
     #[error("unsupported format: {0}")]
     UnsupportedFormat(String),
     #[error("could not parse JSONL at line {line}: {source}")]

@@ -39,6 +39,9 @@ pub fn parse_jsonl(input: &str) -> crate::error::Result<Vec<Observation>> {
                 line: i + 1,
                 source,
             })?;
+        if obs.sample_id.trim().is_empty() {
+            return Err(crate::error::Error::MissingField("sample_id"));
+        }
         out.push(obs);
     }
     Ok(out)
@@ -49,7 +52,11 @@ pub fn parse_csv(input: &[u8]) -> crate::error::Result<Vec<Observation>> {
     let mut rdr = csv::Reader::from_reader(input);
     let mut out = Vec::new();
     for record in rdr.deserialize::<Observation>() {
-        out.push(record?);
+        let obs = record?;
+        if obs.sample_id.trim().is_empty() {
+            return Err(crate::error::Error::MissingField("sample_id"));
+        }
+        out.push(obs);
     }
     Ok(out)
 }
