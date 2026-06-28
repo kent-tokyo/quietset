@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "quietset"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "csv",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "quietset-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",

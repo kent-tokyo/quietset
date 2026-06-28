@@ -1,7 +1,7 @@
 use quietset::{
     Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights, Thresholds,
-    compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha, parse_jsonl,
-    score_all,
+    compute_calibration, compute_evaluator_reliability, compute_fleiss_kappa,
+    compute_krippendorff_alpha, parse_jsonl, score_all,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -901,4 +901,115 @@ fn test_kappa_and_alpha_undefined_for_single_rater() {
     let obs = parse_jsonl(jsonl).unwrap();
     assert!(compute_fleiss_kappa(&obs).is_none());
     assert!(compute_krippendorff_alpha(&obs).is_none());
+}
+
+#[test]
+fn test_calibrate_target_precision() {
+    // a, b, c: 5 observations each, all agree, gold matches → stable and correct
+    // e: 5 obs, all "loss", but gold="win" → stable but WRONG
+    // d: 2 obs, split → unstable
+    let make = |id: &str, label: &str, gold: &str, n: usize| -> Vec<Observation> {
+        (0..n)
+            .map(|i| Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                gold_label: Some(gold.into()),
+                evaluator_id: Some(format!("e{i}")),
+                ..Default::default()
+            })
+            .collect()
+    };
+    let mut obs = Vec::new();
+    obs.extend(make("a", "win", "win", 5));
+    obs.extend(make("b", "win", "win", 5));
+    obs.extend(make("c", "win", "win", 5));
+    obs.push(Observation {
+        sample_id: "d".into(),
+        label: Some("win".into()),
+        gold_label: Some("win".into()),
+        ..Default::default()
+    });
+    obs.push(Observation {
+        sample_id: "d".into(),
+        label: Some("loss".into()),
+        gold_label: Some("win".into()),
+        ..Default::default()
+    });
+    obs.extend(make("e", "loss", "win", 5)); // stable but wrong
+
+    // e is stable (all "loss") and scores 1.0 just like a/b/c; no threshold can separate it.
+    // Best achievable precision: 3 correct / 4 kept (a,b,c,e all score 1.0) = 0.75
+    let result = compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.75, None, 0.40);
+    assert!(
+        result.is_some(),
+        "should find a threshold meeting 0.75 precision"
+    );
+    let r = result.unwrap();
+    assert!(
+        r.achieved_precision >= 0.75,
+        "precision {:.3} should be >= 0.75",
+        r.achieved_precision
+    );
+    assert!(r.keep_threshold >= 0.50 && r.keep_threshold <= 0.99);
+}
+
+#[test]
+fn test_calibrate_no_gold_returns_none() {
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            ..Default::default()
+        },
+    ];
+    assert!(compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.95, None, 0.40).is_none());
+}
+
+#[test]
+fn test_profile_llm_judge_base_weights() {
+    let base = ScoreWeights {
+        evaluator_agreement: 2.0,
+        model_agreement: 2.0,
+        ..ScoreWeights::default()
+    };
+    assert!((base.evaluator_agreement - 2.0).abs() < 1e-9);
+    assert!((base.model_agreement - 2.0).abs() < 1e-9);
+    assert!((base.label_agreement - 1.0).abs() < 1e-9);
+    assert!((base.budget_stability - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_filter_confidence_threshold() {
+    // Sample with 2 obs has lower confidence than sample with 10 obs
+    let obs2 = vec![
+        Observation {
+            sample_id: "s2".into(),
+            label: Some("w".into()),
+            ..Default::default()
+        };
+        2
+    ];
+    let obs10 = vec![
+        Observation {
+            sample_id: "s10".into(),
+            label: Some("w".into()),
+            ..Default::default()
+        };
+        10
+    ];
+    let mut all = obs2;
+    all.extend(obs10);
+    let reports = score_all(all, &ScoreConfig::default());
+    let r2 = reports.iter().find(|r| r.sample_id == "s2").unwrap();
+    let r10 = reports.iter().find(|r| r.sample_id == "s10").unwrap();
+    // confidence = n/(n+3): 2→0.40, 10→0.77
+    assert!(r2.confidence < r10.confidence);
+    // A filter with min_confidence=0.6 should drop s2 but keep s10
+    assert!(r2.confidence < 0.6);
+    assert!(r10.confidence >= 0.6);
 }

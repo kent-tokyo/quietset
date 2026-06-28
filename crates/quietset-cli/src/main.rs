@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use quietset::{
     Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights,
-    StabilityReport, Thresholds, compute_evaluator_reliability, compute_fleiss_kappa,
-    compute_krippendorff_alpha, parse_csv, parse_jsonl, score_all,
+    StabilityReport, Thresholds, compute_calibration, compute_evaluator_reliability,
+    compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv, parse_jsonl, score_all,
 };
 
 #[derive(Parser)]
@@ -34,6 +34,10 @@ enum Commands {
     Compare(CompareArgs),
     /// Estimate per-evaluator reliability from an observation JSONL file (experimental)
     Reliability(ReliabilityArgs),
+    /// Deep diagnostic report for a scored JSONL file
+    Audit(AuditArgs),
+    /// Find a keep_threshold matching a precision or coverage target using gold labels
+    Calibrate(CalibrateArgs),
 }
 
 #[derive(ValueEnum, Clone)]
@@ -41,6 +45,18 @@ enum DecisionScoreArg {
     Raw,
     Adjusted,
     Lcb,
+}
+
+#[derive(ValueEnum, Clone)]
+enum ProfileArg {
+    /// LLM judge: weight evaluator and model agreement 2×; default decision-score lcb.
+    LlmJudge,
+    /// Simulation: weight budget and seed robustness 2×; default decision-score adjusted.
+    Simulation,
+    /// Game/search AI: weight budget 2×, seed 1.5×; default decision-score adjusted; min-observations 3.
+    GameAi,
+    /// Benchmark curation: weight label 2×, evaluator 1.5×; default decision-score raw.
+    Benchmark,
 }
 
 #[derive(clap::Args)]
@@ -123,28 +139,32 @@ struct ScoreArgs {
     estimate_evaluator_reliability: bool,
 
     /// Weight for label_agreement in stability_score (0 = exclude).
-    #[arg(long, default_value_t = 1.0)]
-    weight_labels: f64,
+    #[arg(long)]
+    weight_labels: Option<f64>,
 
     /// Weight for score stability (1 - normalized_score_std) in stability_score.
-    #[arg(long, default_value_t = 1.0)]
-    weight_scores: f64,
+    #[arg(long)]
+    weight_scores: Option<f64>,
 
     /// Weight for budget stability (1 - budget_sensitivity) in stability_score.
-    #[arg(long, default_value_t = 1.0)]
-    weight_budget: f64,
+    #[arg(long)]
+    weight_budget: Option<f64>,
 
     /// Weight for seed stability (1 - seed_sensitivity) in stability_score.
-    #[arg(long, default_value_t = 1.0)]
-    weight_seed: f64,
+    #[arg(long)]
+    weight_seed: Option<f64>,
 
     /// Weight for model_agreement in stability_score.
-    #[arg(long, default_value_t = 1.0)]
-    weight_models: f64,
+    #[arg(long)]
+    weight_models: Option<f64>,
 
     /// Weight for evaluator_agreement in stability_score.
-    #[arg(long, default_value_t = 1.0)]
-    weight_evaluators: f64,
+    #[arg(long)]
+    weight_evaluators: Option<f64>,
+
+    /// Apply a use-case preset. Explicit --weight-* and --decision-score flags override the preset.
+    #[arg(long, value_enum)]
+    profile: Option<ProfileArg>,
 }
 
 #[derive(clap::Args)]
@@ -196,6 +216,10 @@ struct CompareArgs {
     /// Number of top regressions to display.
     #[arg(long, default_value_t = 5)]
     top: usize,
+
+    /// Show per-component mean deltas.
+    #[arg(long)]
+    components: bool,
 }
 
 #[derive(clap::Args)]
@@ -223,6 +247,22 @@ struct FilterArgs {
     /// Skip malformed lines instead of exiting with an error.
     #[arg(long)]
     skip_invalid: bool,
+
+    /// Keep only records with label_agreement_lcb >= this value.
+    #[arg(long)]
+    min_label_lcb: Option<f64>,
+
+    /// Keep only records with confidence >= this value.
+    #[arg(long)]
+    min_confidence: Option<f64>,
+
+    /// Keep only records with score_mad <= this value.
+    #[arg(long)]
+    max_score_mad: Option<f64>,
+
+    /// Keep only records with score_iqr <= this value.
+    #[arg(long)]
+    max_score_iqr: Option<f64>,
 }
 
 #[derive(clap::Args)]
@@ -234,6 +274,38 @@ struct ReliabilityArgs {
     /// Skip malformed lines instead of exiting with an error.
     #[arg(long)]
     skip_invalid: bool,
+}
+
+#[derive(clap::Args)]
+struct AuditArgs {
+    #[arg(default_value = "-")]
+    input: String,
+    #[arg(long)]
+    json: bool,
+    #[arg(long, default_value_t = 10)]
+    top: usize,
+    #[arg(long)]
+    skip_invalid: bool,
+    #[arg(long, default_value_t = 0.85)]
+    keep_threshold: f64,
+}
+
+#[derive(clap::Args)]
+struct CalibrateArgs {
+    #[arg(default_value = "-")]
+    input: String,
+    #[arg(long)]
+    skip_invalid: bool,
+    #[arg(long, default_value_t = 0.95)]
+    target_precision: f64,
+    #[arg(long)]
+    target_coverage: Option<f64>,
+    #[arg(long, value_enum)]
+    decision_score: Option<DecisionScoreArg>,
+    #[arg(long, default_value_t = 0.40)]
+    drop_threshold: f64,
+    #[arg(long, default_value_t = 0.95)]
+    confidence_level: f64,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -378,6 +450,8 @@ fn main() -> Result<()> {
         Commands::Explain(args) => run_explain(args),
         Commands::Compare(args) => run_compare(args),
         Commands::Reliability(args) => run_reliability(args),
+        Commands::Audit(args) => run_audit(args),
+        Commands::Calibrate(args) => run_calibrate(args),
     }
 }
 
@@ -416,6 +490,39 @@ fn run_score(args: ScoreArgs) -> Result<()> {
     if args.decision_score.is_some() && (args.use_adjusted_score || args.use_lcb_score) {
         eprintln!("warning: --decision-score overrides --use-adjusted-score / --use-lcb-score");
     }
+    let base_weights = match &args.profile {
+        Some(ProfileArg::LlmJudge) => ScoreWeights {
+            evaluator_agreement: 2.0,
+            model_agreement: 2.0,
+            ..ScoreWeights::default()
+        },
+        Some(ProfileArg::Simulation) => ScoreWeights {
+            budget_stability: 2.0,
+            seed_stability: 2.0,
+            ..ScoreWeights::default()
+        },
+        Some(ProfileArg::GameAi) => ScoreWeights {
+            budget_stability: 2.0,
+            seed_stability: 1.5,
+            ..ScoreWeights::default()
+        },
+        Some(ProfileArg::Benchmark) => ScoreWeights {
+            label_agreement: 2.0,
+            evaluator_agreement: 1.5,
+            ..ScoreWeights::default()
+        },
+        None => ScoreWeights::default(),
+    };
+    let profile_decision: Option<DecisionScoreArg> = match &args.profile {
+        Some(ProfileArg::LlmJudge) => Some(DecisionScoreArg::Lcb),
+        Some(ProfileArg::Simulation) | Some(ProfileArg::GameAi) => Some(DecisionScoreArg::Adjusted),
+        _ => None,
+    };
+    let profile_min_obs: usize = if matches!(args.profile, Some(ProfileArg::GameAi)) {
+        3
+    } else {
+        0
+    };
     let config = ScoreConfig {
         score_scale: args.score_scale,
         thresholds: Thresholds {
@@ -423,29 +530,34 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             drop: args.drop_threshold,
         },
         weights: ScoreWeights {
-            label_agreement: args.weight_labels,
-            score_stability: args.weight_scores,
-            budget_stability: args.weight_budget,
-            seed_stability: args.weight_seed,
-            model_agreement: args.weight_models,
-            evaluator_agreement: args.weight_evaluators,
+            label_agreement: args.weight_labels.unwrap_or(base_weights.label_agreement),
+            score_stability: args.weight_scores.unwrap_or(base_weights.score_stability),
+            budget_stability: args.weight_budget.unwrap_or(base_weights.budget_stability),
+            seed_stability: args.weight_seed.unwrap_or(base_weights.seed_stability),
+            model_agreement: args.weight_models.unwrap_or(base_weights.model_agreement),
+            evaluator_agreement: args
+                .weight_evaluators
+                .unwrap_or(base_weights.evaluator_agreement),
         },
         confidence_k: args.confidence_k,
         min_requirements: MinRequirements {
-            observations: args.min_observations_keep,
+            observations: args.min_observations_keep.max(profile_min_obs),
             evaluators: args.min_evaluators_keep,
             seeds: args.min_seeds_keep,
             budgets: args.min_budgets_keep,
             models: args.min_models_keep,
         },
-        // --decision-score wins; --use-* are backwards-compat aliases (fallback only)
-        decision_score: match args.decision_score {
-            Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
-            Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
-            Some(DecisionScoreArg::Raw) => DecisionScore::Raw,
-            None if args.use_lcb_score => DecisionScore::LowerConfidenceBound,
-            None if args.use_adjusted_score => DecisionScore::Adjusted,
-            None => DecisionScore::Raw,
+        // --decision-score wins; profile default next; --use-* are backwards-compat aliases (fallback only)
+        decision_score: match (&args.decision_score, &profile_decision) {
+            (Some(DecisionScoreArg::Lcb), _) => DecisionScore::LowerConfidenceBound,
+            (Some(DecisionScoreArg::Adjusted), _) => DecisionScore::Adjusted,
+            (Some(DecisionScoreArg::Raw), _) => DecisionScore::Raw,
+            (None, Some(DecisionScoreArg::Lcb)) => DecisionScore::LowerConfidenceBound,
+            (None, Some(DecisionScoreArg::Adjusted)) => DecisionScore::Adjusted,
+            (None, Some(DecisionScoreArg::Raw)) => DecisionScore::Raw,
+            (None, _) if args.use_lcb_score => DecisionScore::LowerConfidenceBound,
+            (None, _) if args.use_adjusted_score => DecisionScore::Adjusted,
+            _ => DecisionScore::Raw,
         },
         confidence_level: args.confidence_level,
     };
@@ -513,6 +625,26 @@ fn run_filter(args: FilterArgs) -> Result<()> {
             if report.decision != want {
                 continue;
             }
+        }
+        if let Some(min) = args.min_label_lcb
+            && report.label_agreement_lcb.is_none_or(|v| v < min)
+        {
+            continue;
+        }
+        if let Some(min) = args.min_confidence
+            && report.confidence < min
+        {
+            continue;
+        }
+        if let Some(max) = args.max_score_mad
+            && report.score_mad.is_some_and(|v| v > max)
+        {
+            continue;
+        }
+        if let Some(max) = args.max_score_iqr
+            && report.score_iqr.is_some_and(|v| v > max)
+        {
+            continue;
         }
         writeln!(out, "{line}")?;
     }
@@ -792,6 +924,38 @@ fn run_compare(args: CompareArgs) -> Result<()> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    #[allow(clippy::type_complexity)]
+    const COMP_FNS: &[(&str, fn(&quietset::StabilityComponents) -> Option<f64>)] = &[
+        ("label", |c| c.label),
+        ("score_consistency", |c| c.score_consistency),
+        ("budget_robustness", |c| c.budget_robustness),
+        ("seed_robustness", |c| c.seed_robustness),
+        ("model_agreement", |c| c.model_agreement),
+        ("evaluator_agreement", |c| c.evaluator_agreement),
+    ];
+    let mut comp_deltas: Vec<(&str, f64, f64)> = Vec::new();
+    if args.components {
+        for &(name, f) in COMP_FNS {
+            let mut sb = 0.0f64;
+            let mut cb = 0usize;
+            let mut sa = 0.0f64;
+            let mut ca = 0usize;
+            for (b, a) in &pairs {
+                if let Some(v) = f(&b.components) {
+                    sb += v;
+                    cb += 1;
+                }
+                if let Some(v) = f(&a.components) {
+                    sa += v;
+                    ca += 1;
+                }
+            }
+            if cb > 0 && ca > 0 {
+                comp_deltas.push((name, sb / cb as f64, sa / ca as f64));
+            }
+        }
+    }
+
     if args.json {
         let mut transitions = serde_json::Map::new();
         for (i, from) in labels.iter().enumerate() {
@@ -808,16 +972,21 @@ fn run_compare(args: CompareArgs) -> Result<()> {
                 serde_json::json!({ "sample_id": id, "before": b, "after": a, "delta": a - b })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "n_matched": pairs.len(),
-                "mean_stability_before": mean_before,
-                "mean_stability_after": mean_after,
-                "transitions": transitions,
-                "top_regressions": top_regressions,
-            }))?
-        );
+        let mut out_json = serde_json::json!({
+            "n_matched": pairs.len(),
+            "mean_stability_before": mean_before,
+            "mean_stability_after": mean_after,
+            "transitions": transitions,
+            "top_regressions": top_regressions,
+        });
+        if !comp_deltas.is_empty() {
+            let deltas: serde_json::Map<String, serde_json::Value> = comp_deltas
+                .iter()
+                .map(|(n, b, a)| (n.to_string(), serde_json::json!(a - b)))
+                .collect();
+            out_json["component_deltas"] = serde_json::Value::Object(deltas);
+        }
+        println!("{}", serde_json::to_string_pretty(&out_json)?);
         return Ok(());
     }
 
@@ -845,6 +1014,354 @@ fn run_compare(args: CompareArgs) -> Result<()> {
             println!("  {}  {:.4} → {:.4}  (Δ{:.4})", id, b, a, a - b);
         }
     }
+    if !comp_deltas.is_empty() {
+        println!();
+        println!("component deltas (mean before → after):");
+        for (name, b, a) in &comp_deltas {
+            let d = a - b;
+            let marker = if d < -0.05 { "  ← regression" } else { "" };
+            println!("  {:<26} {:.4} → {:.4}  ({:+.4}){}", name, b, a, d, marker);
+        }
+    }
+    Ok(())
+}
+
+fn run_audit(args: AuditArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let mut reports: Vec<StabilityReport> = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(r) => reports.push(r),
+            Err(e) => {
+                if args.skip_invalid {
+                    eprintln!("warning: skipping line {}: {e}", i + 1);
+                } else {
+                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
+                }
+            }
+        }
+    }
+    if reports.is_empty() {
+        anyhow::bail!("no records found");
+    }
+
+    let total = reports.len();
+    let n_keep = reports
+        .iter()
+        .filter(|r| r.decision == Decision::Keep)
+        .count();
+    let n_review = reports
+        .iter()
+        .filter(|r| r.decision == Decision::Review)
+        .count();
+    let n_drop = reports
+        .iter()
+        .filter(|r| r.decision == Decision::Drop)
+        .count();
+
+    let mut scores: Vec<f64> = reports.iter().map(|r| r.stability_score).collect();
+    scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let smean = scores.iter().sum::<f64>() / scores.len() as f64;
+    let smedian = percentile(&scores, 0.50);
+    let sp10 = percentile(&scores, 0.10);
+    let sp90 = percentile(&scores, 0.90);
+
+    let mad_vals: Vec<f64> = reports.iter().filter_map(|r| r.score_mad).collect();
+    let iqr_vals: Vec<f64> = reports.iter().filter_map(|r| r.score_iqr).collect();
+    let mad_mean = if mad_vals.is_empty() {
+        None
+    } else {
+        Some(mad_vals.iter().sum::<f64>() / mad_vals.len() as f64)
+    };
+    let iqr_mean = if iqr_vals.is_empty() {
+        None
+    } else {
+        Some(iqr_vals.iter().sum::<f64>() / iqr_vals.len() as f64)
+    };
+
+    let lcb_keep_demotions = reports
+        .iter()
+        .filter(|r| {
+            r.stability_score >= args.keep_threshold
+                && r.label_agreement_lcb
+                    .is_some_and(|v| v < args.keep_threshold)
+        })
+        .count();
+    let has_lcb = reports.iter().any(|r| r.label_agreement_lcb.is_some());
+
+    let mut driver_counts: HashMap<&'static str, usize> = HashMap::new();
+    let unstable: Vec<&StabilityReport> = reports
+        .iter()
+        .filter(|r| r.decision != Decision::Keep)
+        .collect();
+    for r in &unstable {
+        if let Some((name, _)) = r.components.weakest() {
+            *driver_counts.entry(name).or_insert(0) += 1;
+        }
+    }
+    let mut drivers: Vec<(&str, usize)> = driver_counts.into_iter().collect();
+    drivers.sort_by_key(|d| Reverse(d.1));
+
+    let mut borderline: Vec<&StabilityReport> = reports
+        .iter()
+        .filter(|r| r.stability_score >= 0.75 && r.stability_score <= 0.95)
+        .collect();
+    borderline.sort_by(|a, b| {
+        a.stability_score
+            .partial_cmp(&b.stability_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut high_raw_low_lcb: Vec<&StabilityReport> = reports
+        .iter()
+        .filter(|r| {
+            r.stability_score >= args.keep_threshold
+                && r.label_agreement_lcb
+                    .is_some_and(|v| v < args.keep_threshold)
+        })
+        .collect();
+    high_raw_low_lcb.sort_by(|a, b| {
+        a.label_agreement_lcb
+            .unwrap_or(1.0)
+            .partial_cmp(&b.label_agreement_lcb.unwrap_or(1.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut high_score_mad: Vec<&StabilityReport> =
+        reports.iter().filter(|r| r.score_mad.is_some()).collect();
+    high_score_mad.sort_by(|a, b| {
+        b.score_mad
+            .unwrap()
+            .partial_cmp(&a.score_mad.unwrap())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut budget_sensitive: Vec<&StabilityReport> = reports
+        .iter()
+        .filter(|r| r.budget_sensitivity.is_some())
+        .collect();
+    budget_sensitive.sort_by(|a, b| {
+        b.budget_sensitivity
+            .unwrap()
+            .partial_cmp(&a.budget_sensitivity.unwrap())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut seed_sensitive: Vec<&StabilityReport> = reports
+        .iter()
+        .filter(|r| r.seed_sensitivity.is_some())
+        .collect();
+    seed_sensitive.sort_by(|a, b| {
+        b.seed_sensitivity
+            .unwrap()
+            .partial_cmp(&a.seed_sensitivity.unwrap())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let top = args.top;
+
+    if args.json {
+        let pct = |n: usize| n as f64 / total as f64;
+        let mut out = serde_json::json!({
+            "total": total,
+            "keep": n_keep, "review": n_review, "drop": n_drop,
+            "keep_rate": pct(n_keep), "review_rate": pct(n_review), "drop_rate": pct(n_drop),
+            "stability": { "mean": smean, "median": smedian, "p10": sp10, "p90": sp90 },
+            "instability_drivers": drivers.iter().map(|(n, c)| (driver_label(n).to_string(), serde_json::json!(c))).collect::<serde_json::Map<_,_>>(),
+            "borderline": borderline.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "stability_score": r.stability_score, "decision": format!("{}", r.decision)})).collect::<Vec<_>>(),
+            "high_raw_low_lcb": high_raw_low_lcb.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "stability_score": r.stability_score, "label_agreement_lcb": r.label_agreement_lcb})).collect::<Vec<_>>(),
+            "high_score_mad": high_score_mad.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "score_mad": r.score_mad})).collect::<Vec<_>>(),
+            "budget_sensitive": budget_sensitive.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "budget_sensitivity": r.budget_sensitivity})).collect::<Vec<_>>(),
+            "seed_sensitive": seed_sensitive.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "seed_sensitivity": r.seed_sensitivity})).collect::<Vec<_>>(),
+        });
+        if has_lcb {
+            out["lcb_keep_demotions"] = serde_json::json!(lcb_keep_demotions);
+        }
+        if let Some(v) = mad_mean {
+            out["score_mad_mean"] = serde_json::json!(v);
+        }
+        if let Some(v) = iqr_mean {
+            out["score_iqr_mean"] = serde_json::json!(v);
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let pct = |n: usize| n as f64 / total as f64 * 100.0;
+    println!("=== quietset audit ===");
+    println!("total:          {:>8}", total);
+    println!("  keep:         {:>8}  ({:.1}%)", n_keep, pct(n_keep));
+    println!("  review:       {:>8}  ({:.1}%)", n_review, pct(n_review));
+    println!("  drop:         {:>8}  ({:.1}%)", n_drop, pct(n_drop));
+    if has_lcb {
+        println!(
+            "  lcb_keep_demotions:{:>5}  (stability >= {:.2}, lcb < {:.2})",
+            lcb_keep_demotions, args.keep_threshold, args.keep_threshold
+        );
+    }
+    println!();
+    println!("stability_score:");
+    println!("  mean:         {:>8.4}", smean);
+    println!("  median:       {:>8.4}", smedian);
+    println!("  p10 / p90:    {:.4} / {:.4}", sp10, sp90);
+    if mad_mean.is_some() || iqr_mean.is_some() {
+        println!();
+        println!("score dispersion (mean across samples):");
+        if let Some(v) = mad_mean {
+            println!("  mad:          {:>8.4}", v);
+        }
+        if let Some(v) = iqr_mean {
+            println!("  iqr:          {:>8.4}", v);
+        }
+    }
+    if !drivers.is_empty() && !unstable.is_empty() {
+        println!();
+        println!("top instability drivers:");
+        for (name, count) in drivers.iter().take(6) {
+            println!(
+                "  {:<24} {:.0}%",
+                driver_label(name),
+                *count as f64 / unstable.len() as f64 * 100.0
+            );
+        }
+    }
+    if !borderline.is_empty() {
+        println!();
+        println!(
+            "--- borderline (0.75 <= stability <= 0.95, top {}) ---",
+            borderline.len().min(top)
+        );
+        for r in borderline.iter().take(top) {
+            println!(
+                "  {:<36} {:.4}  {}",
+                r.sample_id, r.stability_score, r.decision
+            );
+        }
+    }
+    if !high_raw_low_lcb.is_empty() {
+        println!();
+        println!(
+            "--- high_raw_low_lcb (stability >= {:.2}, lcb < {:.2}, top {}) ---",
+            args.keep_threshold,
+            args.keep_threshold,
+            high_raw_low_lcb.len().min(top)
+        );
+        for r in high_raw_low_lcb.iter().take(top) {
+            println!(
+                "  {:<36} stability={:.4}  lcb={:.4}",
+                r.sample_id,
+                r.stability_score,
+                r.label_agreement_lcb.unwrap_or(0.0)
+            );
+        }
+    }
+    if !high_score_mad.is_empty() {
+        println!();
+        println!(
+            "--- high_score_mad (top {}) ---",
+            high_score_mad.len().min(top)
+        );
+        for r in high_score_mad.iter().take(top) {
+            println!(
+                "  {:<36} mad={:.4}",
+                r.sample_id,
+                r.score_mad.unwrap_or(0.0)
+            );
+        }
+    }
+    if !budget_sensitive.is_empty() {
+        println!();
+        println!(
+            "--- budget_sensitive (top {}) ---",
+            budget_sensitive.len().min(top)
+        );
+        for r in budget_sensitive.iter().take(top) {
+            println!(
+                "  {:<36} budget_sensitivity={:.4}",
+                r.sample_id,
+                r.budget_sensitivity.unwrap_or(0.0)
+            );
+        }
+    }
+    if !seed_sensitive.is_empty() {
+        println!();
+        println!(
+            "--- seed_sensitive (top {}) ---",
+            seed_sensitive.len().min(top)
+        );
+        for r in seed_sensitive.iter().take(top) {
+            println!(
+                "  {:<36} seed_sensitivity={:.4}",
+                r.sample_id,
+                r.seed_sensitivity.unwrap_or(0.0)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_calibrate(args: CalibrateArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let observations = if args.skip_invalid {
+        let mut obs = Vec::new();
+        for (i, line) in raw.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Observation>(line) {
+                Ok(o) => match o.validate(i + 1) {
+                    Ok(()) => obs.push(o),
+                    Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+                },
+                Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+            }
+        }
+        obs
+    } else {
+        parse_jsonl(&raw).context("parsing JSONL")?
+    };
+    if observations.is_empty() {
+        anyhow::bail!("no observations found");
+    }
+
+    let decision_score = match args.decision_score {
+        Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
+        Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
+        Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
+    };
+
+    let result = compute_calibration(
+        &observations,
+        &decision_score,
+        args.confidence_level,
+        args.target_precision,
+        args.target_coverage,
+        args.drop_threshold,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "calibration failed: either no gold_label is present in observations, or no \
+         threshold in [0.50, 0.99] meets the target. Try --target-precision with a lower value."
+        )
+    })?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "decision_score":      result.decision_score_name,
+            "keep_threshold":      result.keep_threshold,
+            "drop_threshold":      result.drop_threshold,
+            "achieved_precision":  result.achieved_precision,
+            "coverage":            result.coverage,
+            "n_keep":              result.n_keep,
+            "n_total":             result.n_total,
+        }))?
+    );
     Ok(())
 }
 
@@ -876,8 +1393,45 @@ fn run_reliability(args: ReliabilityArgs) -> Result<()> {
     let reliability = compute_evaluator_reliability(&observations, &reports);
     let mut sorted: Vec<_> = reliability.into_iter().collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let gold_map: std::collections::HashMap<&str, &str> = observations
+        .iter()
+        .filter_map(|o| o.gold_label.as_deref().map(|g| (o.sample_id.as_str(), g)))
+        .collect();
+    let has_gold = !gold_map.is_empty();
+
+    // confusion[eval_id][predicted][gold] = count
+    let mut confusion_data: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, std::collections::HashMap<String, usize>>,
+    > = std::collections::HashMap::new();
+    if has_gold {
+        for obs in &observations {
+            if let (Some(eval_id), Some(label)) =
+                (obs.evaluator_id.as_deref(), obs.label.as_deref())
+                && let Some(&gold) = gold_map.get(obs.sample_id.as_str())
+            {
+                *confusion_data
+                    .entry(eval_id.to_string())
+                    .or_default()
+                    .entry(label.to_string())
+                    .or_default()
+                    .entry(gold.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
     for (eval_id, r) in &sorted {
-        let line = serde_json::json!({ "evaluator_id": eval_id, "reliability": r });
+        let line = if has_gold {
+            let conf = confusion_data
+                .get(eval_id.as_str())
+                .cloned()
+                .unwrap_or_default();
+            serde_json::json!({ "evaluator_id": eval_id, "reliability": r, "confusion": conf })
+        } else {
+            serde_json::json!({ "evaluator_id": eval_id, "reliability": r })
+        };
         println!("{}", serde_json::to_string(&line)?);
     }
     let kappa = compute_fleiss_kappa(&observations);
