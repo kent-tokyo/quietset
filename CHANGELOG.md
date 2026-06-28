@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added
+- `label_agreement_lcb` on `StabilityReport` — Wilson confidence interval lower bound of `label_agreement`; guards against over-confidence on low-n samples
+- `score_mad`, `score_iqr` on `StabilityReport` — median absolute deviation and interquartile range; more robust to outliers than `score_std`
+- `gold_label` on `Observation` — known-correct label; `compute_evaluator_reliability` uses it as ground truth over majority vote when present
+- `DecisionScore::LowerConfidenceBound` — new decision mode using `label_agreement_lcb` (most conservative)
+- `--decision-score raw|adjusted|lcb` enum flag on `score` command (preferred over boolean aliases for scripting)
+- `--confidence-level` flag for Wilson LCB confidence level (default 0.95)
+- `explain`: `label_agreement_lcb` line and `score stats` block (mean / std / mad / iqr)
+- `summary`: `lcb_keep_demotions` count (samples raw scoring keeps but LCB mode would demote), `score_mad_mean`, `score_iqr_mean`; `--keep-threshold` flag
+- `summary --json`: `lcb_keep_demotions`, `score_mad_mean`, `score_iqr_mean` fields
+- `.github/dependabot.yml` — weekly Cargo scans for workspace root and `crates/quietset-py`
+- CI: `permissions: contents: read` on `GITHUB_TOKEN`
+- Decisions section in README updated to 3-mode table with alias column
+- "stable ≠ correct" note added to README and README_ja
+
+### Fixed
+- `lcb_keep_demotions` now correctly counts only samples where `stability_score >= keep_threshold AND label_agreement_lcb < keep_threshold`; previously included samples already below the raw threshold
+- pyo3 bumped 0.21 → 0.29 in `crates/quietset-py` (fixes CVE: missing `Sync` bound on `PyCFunction`, out-of-bounds read in `nth`/`nth_back`, buffer overflow in `PyString::from_object`)
+
+### Changed
+- `--use-adjusted-score` and `--use-lcb-score` are now documented as aliases for `--decision-score adjusted` and `--decision-score lcb`; `--decision-score` takes precedence when both are specified; a warning is emitted to stderr on conflict
+
 ## 0.1.0 — 2026-06-28
 
 ### Added
