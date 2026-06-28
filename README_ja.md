@@ -1,14 +1,43 @@
 # quietset
 
-quietset は、タスク固有の前提条件に依存せず、ラベルの安定性によってデータセットをフィルタリングします。
+[![CI](https://github.com/kent-tokyo/quietset/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/quietset/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/quietset.svg)](https://crates.io/crates/quietset)
+[![docs.rs](https://docs.rs/quietset/badge.svg)](https://docs.rs/quietset)
 
-複数の評価者・計算コスト・ランダムシード・モデルチェックポイント・繰り返し実行を通じて、ラベルやスコアが安定しているサンプルだけを残すために使います。
-
-ノイズの多い教師データの整理、合成データのフィルタリング、強化学習のサンプル選択、探索ベースのラベリング、シミュレーション結果の絞り込み、ベンチマークのキュレーションに役立ちます。
+モデルに依存しない安定性フィルタ — 評価者・budget・seed・モデルチェックポイントをまたいでラベルやスコアが一致するサンプルだけを残します。
 
 quietset はモデルの訓練ツールでも、アノテーションプラットフォームでも、画像品質チェッカーでもありません。他のツールと組み合わせて使う、小さな安定性フィルタリングのプリミティブです。
 
-> **注意:** quietset が測るのは「安定性」であり「正確性」ではありません。評価者が一致して間違えるサンプルは高スコアになります。`gold_label` ベースの reliability や `--use-lcb-score` を使って証拠量ベースの保守性を加えてください。
+> **注意:** quietset が測るのは「安定性」であり「正確性」ではありません。評価者が一致して間違えるサンプルは高スコアになります。`gold_label` ベースの reliability や `--decision-score lcb` を使って証拠量ベースの保守性を加えてください。
+
+## ユースケース
+
+### ゲーム AI / 探索学習データ
+
+複数エンジン・探索深さ・seed で同じ局面を評価し、評価値やラベルが安定している局面だけを学習データに残す。
+
+```bash
+quietset score positions.jsonl --profile game-ai > stable_positions.jsonl
+quietset stable-wrong-risk positions.jsonl  # 安定して誤ラベルの局面を検出
+```
+
+### LLM judge パイプライン
+
+複数の judge モデルやプロンプトで同じ回答を評価し、一致率の高い回答だけを残す。Wilson LCB で少数観測の過信を防ぐ。
+
+```bash
+quietset score judge_evals.jsonl --profile llm-judge > reliable_evals.jsonl
+quietset calibrate judge_evals.jsonl --target-precision 0.95 --decision-score lcb
+```
+
+### 合成データ / シミュレーション
+
+seed・budget・モデルチェックポイントをまたいでスコアが安定しているサンプルだけを残す。
+
+```bash
+quietset score runs.jsonl --profile simulation > robust_samples.jsonl
+quietset audit robust_samples.jsonl --json | jq '.seed_sensitive[:5]'
+```
 
 ## インストール
 
@@ -87,6 +116,22 @@ quietset audit scored.jsonl --json | jq '.high_raw_low_lcb'
 quietset calibrate input.jsonl --target-precision 0.95
 quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 ```
+
+## コマンドリファレンス
+
+| コマンド | 入力 | 用途 |
+|---------|------|------|
+| `score` | 観測 JSONL/CSV | 安定性スコアと判定を計算 |
+| `filter` | scored JSONL | 安定性・判定・LCB・confidence・分散で絞り込み |
+| `summary` | scored JSONL | 集計統計、`lcb_keep_demotions`、`--json` で CI 連携 |
+| `explain` | scored JSONL | サンプル単位のコンポーネント内訳（ビジュアルバー付き） |
+| `compare` | scored JSONL × 2 | 前後比較、コンポーネント差分、ポリシー比較 |
+| `reliability` | 観測 JSONL | 評価者信頼度、混同行列、Fleiss kappa、Krippendorff alpha |
+| `audit` | scored JSONL | 深掘り診断レポート（borderline / LCB リスク / 感度リスト） |
+| `select` | scored JSONL | 診断クラスでサンプル抽出（パイプ対応） |
+| `recommend` | scored JSONL | 再評価候補と理由を提案 |
+| `stable-wrong-risk` | 観測 JSONL | 安定的に誤ラベルの keep サンプル率（`gold_label` 必須） |
+| `calibrate` | 観測 JSONL | 精度目標を満たす keep 閾値を自動探索 |
 
 ## 入力 JSONL フォーマット
 
@@ -182,9 +227,12 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 }
 ```
 
-### 用途別に重みを調整する
+`--weight-*` フラグで個別調整するか、`--profile` を使ってください（→ [プロファイル](#プロファイル)）。
 
-`--weight-*` フラグで個別調整するか、`--profile` でプリセットを使えます。
+## プロファイル
+
+手動で重みを調整する代わりに、`--profile` でユースケースプリセットを適用できます。
+明示的な `--weight-*` / `--decision-score` はプリセットより優先されます。
 
 | プロファイル | 重み変更 | デフォルト decision-score |
 |------------|--------|------------------------|
@@ -193,10 +241,8 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `game-ai` | budget ×2、seed ×1.5、最低観測数 3 | `adjusted` |
 | `benchmark` | label ×2、evaluator ×1.5 | `raw` |
 
-明示的な `--weight-*` / `--decision-score` はプリセットより優先されます。
-
 ```bash
-# LLM judge プリセット
+# LLM judge プリセット（--weight-evaluators 2 --weight-models 2 --decision-score lcb と等価）
 quietset score input.jsonl --profile llm-judge > scored.jsonl
 
 # プリセットから一部を上書き
@@ -379,6 +425,8 @@ quietset summary scored.jsonl --json | jq '.drop_rate < 0.1'
 ```
 
 ## reliability コマンド（experimental）
+
+> 安定性は一致度であって正確性ではありません。`stable-wrong-risk` を使うと、安定的に誤ラベルな keep サンプルの割合を測定できます — 安定性フィルタリングの最も危険な失敗モードです。
 
 観測 JSONL から評価者ごとの信頼度を推定します。
 
