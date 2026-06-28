@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// The filtering decision for a sample based on its stability score.
@@ -95,6 +96,21 @@ pub struct StabilityReport {
     /// Normalized Shannon entropy of label distribution [0, 1]. 0.0 = unanimous, 1.0 = uniform. None if no labels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_entropy: Option<f64>,
+    /// Fraction of observations per label, sorted by frequency descending. None if no labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_distribution: Option<IndexMap<String, f64>>,
+    /// Reliability-weighted majority label. None if no labels or no evaluator_ids present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weighted_majority_label: Option<String>,
+    /// Confidence of weighted_majority_label: max weighted fraction in [0, 1]. None if not computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weighted_label_confidence: Option<f64>,
+    /// Reliability-weighted label distribution, sorted by weight descending. None if not computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weighted_label_distribution: Option<IndexMap<String, f64>>,
+    /// True when weighted_majority_label differs from majority_label. None if not computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub majority_weighted_conflict: Option<bool>,
     /// Mean of all numeric scores.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_mean: Option<f64>,

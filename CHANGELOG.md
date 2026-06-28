@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.8.0 — 2026-06-28
+
+### Added
+- `label_distribution` field on `StabilityReport` — fraction of observations per label, sorted by frequency descending; `None` when no labels present
+- `weighted_majority_label`, `weighted_label_confidence`, `weighted_label_distribution`, `majority_weighted_conflict` fields on `StabilityReport` — set when `score --vote weighted` is used
+- `score_all_weighted()` — 2-pass function: standard scoring → per-evaluator reliability weights → weighted majority vote; exported from `quietset` crate
+- `compute_evaluator_weights()`, `compute_weighted_majority()` — reliability weighting primitives; exported from `quietset` crate
+- `score --vote raw|weighted` flag — `weighted` triggers `score_all_weighted`
+- `policy` command — sweeps `keep_threshold` 0.99→0.50 and outputs precision / coverage / stable_wrong_rate table; `--target-precision`, `--target-coverage`, `--json`, `--decision-score` flags
+- `active-review` command — ranks scored JSONL samples by re-evaluation urgency (low LCB, high entropy, score MAD, budget/seed sensitivity); `--top`, `--unstable-only`, per-signal `--weight-*` flags
+- `--score-dispersion std|mad|iqr` on `score` command — selects the dispersion metric used for the `score_consistency` stability component; `mad` and `iqr` are more robust when occasional outlier scores are present; default `std` is backward-compatible
+- `ScoreDispersion` enum (`Std`, `Mad`, `Iqr`) exported from `quietset` crate; `ScoreConfig::score_dispersion` field
+
+### Changed
+- `game-ai` profile: `seed_stability` weight 1.5× → 2×, `min_observations_keep` 3 → 4, `min_budgets_keep` 0 → 2, `min_seeds_keep` 0 → 2, default `decision_score` adjusted → LCB
+
+## 0.7.0 — 2026-06-28
+
+### Added
+- `score --embed-stats` — appends a trailing sentinel stats line (`{"_quietset_stats":true,...}`) with `fleiss_kappa` and `krippendorff_alpha` to scored JSONL output; opt-in; backward-compatible via `--skip-invalid`
+- `audit --json` — auto-reads embedded kappa/alpha from `--embed-stats` output; `--observations` still takes priority
+- `recommend --text` — human-readable column output (sample_id | reason | action | detail); JSONL default preserved
+
 ## 0.6.0 — 2026-06-28
 
 ### Added

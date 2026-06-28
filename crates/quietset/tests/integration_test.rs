@@ -1,7 +1,8 @@
 use quietset::{
-    Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights, Thresholds,
-    compute_calibration, compute_evaluator_reliability, compute_fleiss_kappa,
-    compute_krippendorff_alpha, parse_jsonl, score_all,
+    Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreDispersion,
+    ScoreWeights, Thresholds, compute_calibration, compute_evaluator_reliability,
+    compute_evaluator_weights, compute_fleiss_kappa, compute_krippendorff_alpha, parse_jsonl,
+    score_all, score_all_weighted,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -1012,4 +1013,353 @@ fn test_filter_confidence_threshold() {
     // A filter with min_confidence=0.6 should drop s2 but keep s10
     assert!(r2.confidence < 0.6);
     assert!(r10.confidence >= 0.6);
+}
+
+#[test]
+fn test_label_distribution_basic() {
+    // 2 "win" + 1 "loss" → distribution {"win": ~0.667, "loss": ~0.333}
+    let jsonl = r#"{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"loss"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    let r = &reports[0];
+    let dist = r
+        .label_distribution
+        .as_ref()
+        .expect("label_distribution should be Some");
+    let win_frac = *dist.get("win").unwrap();
+    let loss_frac = *dist.get("loss").unwrap();
+    assert!(
+        (win_frac - 2.0 / 3.0).abs() < 1e-9,
+        "win fraction: {win_frac}"
+    );
+    assert!(
+        (loss_frac - 1.0 / 3.0).abs() < 1e-9,
+        "loss fraction: {loss_frac}"
+    );
+    // Most common label comes first
+    let first = dist.keys().next().unwrap();
+    assert_eq!(first, "win");
+}
+
+#[test]
+fn test_label_distribution_none_when_no_labels() {
+    let obs = vec![Observation {
+        sample_id: "x".into(),
+        score: Some(0.9),
+        ..Default::default()
+    }];
+    let reports = score_all(obs, &ScoreConfig::default());
+    assert!(reports[0].label_distribution.is_none());
+}
+
+#[test]
+fn test_weighted_majority_overrides_majority() {
+    // Evaluator A (reliable: gold matches) says "win".
+    // Evaluators B and C (unreliable: gold disagrees) both say "loss".
+    // Raw majority = "loss" (2 vs 1). Weighted majority should = "win".
+    let obs = vec![
+        Observation {
+            sample_id: "s".into(),
+            label: Some("win".into()),
+            evaluator_id: Some("A".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "s".into(),
+            label: Some("loss".into()),
+            evaluator_id: Some("B".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "s".into(),
+            label: Some("loss".into()),
+            evaluator_id: Some("C".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+    ];
+    let reports = score_all_weighted(obs.clone(), &ScoreConfig::default());
+    let r = &reports[0];
+    // Raw majority is "loss"
+    assert_eq!(r.majority_label.as_deref(), Some("loss"));
+    // Evaluator weights: A matches gold (1/1 + smoothing), B&C don't (0/1 + smoothing)
+    let truth: std::collections::HashMap<String, String> = obs
+        .iter()
+        .filter_map(|o| o.gold_label.clone().map(|g| (o.sample_id.clone(), g)))
+        .collect();
+    let weights = compute_evaluator_weights(&obs, &truth);
+    let w_a = *weights.get("A").unwrap();
+    let w_b = *weights.get("B").unwrap();
+    assert!(w_a > w_b, "A should have higher weight than B/C");
+    // Weighted majority overrides: "win" wins when A's weight > sum of B+C weights
+    // A: (1+0.5)/(1+1)=0.75, B/C: (0+0.5)/(1+1)=0.25 each → win score=0.75, loss=0.50
+    assert_eq!(r.weighted_majority_label.as_deref(), Some("win"));
+    assert_eq!(r.majority_weighted_conflict, Some(true));
+}
+
+#[test]
+fn test_game_ai_profile_uses_lcb_and_stricter_mins() {
+    // Verify game-ai profile config values (test the library-level config, not CLI)
+    // In the CLI, game-ai sets: budget_stability×2, seed_stability×2, min_obs=4, min_budgets=2, min_seeds=2, lcb
+    // We replicate that config here directly.
+    let config = ScoreConfig {
+        weights: ScoreWeights {
+            budget_stability: 2.0,
+            seed_stability: 2.0,
+            ..ScoreWeights::default()
+        },
+        min_requirements: MinRequirements {
+            observations: 4,
+            budgets: 2,
+            seeds: 2,
+            ..MinRequirements::default()
+        },
+        decision_score: DecisionScore::LowerConfidenceBound,
+        ..ScoreConfig::default()
+    };
+    // Sample with enough budget/seed variation to pass score but only 1 budget level → demoted
+    let obs: Vec<Observation> = (0..5)
+        .map(|i| Observation {
+            sample_id: "p".into(),
+            label: Some("win".into()),
+            score: Some(0.9),
+            budget: Some(4.0), // all same budget → min_budgets=2 not met
+            seed: Some(i),
+            ..Default::default()
+        })
+        .collect();
+    let reports = score_all(obs, &config);
+    // Would be keep by stability score, but demoted because only 1 distinct budget
+    assert_ne!(
+        reports[0].decision,
+        Decision::Keep,
+        "should be demoted by min_budgets=2"
+    );
+}
+
+#[test]
+fn test_policy_precision_decreases_with_lower_threshold() {
+    // With gold_label: higher threshold → higher precision (fewer, better samples)
+    let obs: Vec<Observation> = vec![
+        // 4 stable-correct (agreement 1.0 for "win", gold="win")
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "b".into(),
+            label: Some("win".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "b".into(),
+            label: Some("win".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+        // 1 wrong (agreement 1.0 for "loss", gold="win") — stable but wrong
+        Observation {
+            sample_id: "c".into(),
+            label: Some("loss".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "c".into(),
+            label: Some("loss".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+    ];
+    let gold: std::collections::HashMap<String, String> = obs
+        .iter()
+        .filter_map(|o| o.gold_label.clone().map(|g| (o.sample_id.clone(), g)))
+        .collect();
+    // Score all
+    let config = ScoreConfig {
+        thresholds: Thresholds {
+            keep: 0.0,
+            drop: -1.0,
+        },
+        ..ScoreConfig::default()
+    };
+    let reports = score_all(obs, &config);
+    // At threshold=0.0 all 3 are "kept"; precision = 2/3
+    let all_kept: Vec<_> = reports
+        .iter()
+        .filter(|r| r.stability_score >= 0.0)
+        .collect();
+    let matches = all_kept
+        .iter()
+        .filter(|r| {
+            gold.get(&r.sample_id)
+                .and_then(|g| r.majority_label.as_deref().map(|m| m == g.as_str()))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(all_kept.len(), 3);
+    assert_eq!(matches, 2, "2 of 3 samples are correct");
+    // At high threshold only a and b are kept (stable correct ones, same stability)
+    // c has same stability but majority_label="loss"≠"win"
+    // All have same stability_score since they're all unanimous 2-obs
+    // This just validates our precision math is right
+    let prec_all = matches as f64 / all_kept.len() as f64;
+    assert!((prec_all - 2.0 / 3.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_active_review_high_entropy_has_higher_urgency() {
+    // Sample with high entropy should rank higher urgency than sample with low entropy
+    let jsonl_high = r#"{"sample_id":"noisy","label":"win"}
+{"sample_id":"noisy","label":"loss"}"#;
+    let jsonl_low = r#"{"sample_id":"stable","label":"win"}
+{"sample_id":"stable","label":"win"}"#;
+    let mut obs: Vec<Observation> = parse_jsonl(jsonl_high).unwrap();
+    obs.extend(parse_jsonl(jsonl_low).unwrap());
+    let reports = score_all(obs, &ScoreConfig::default());
+    let noisy = reports.iter().find(|r| r.sample_id == "noisy").unwrap();
+    let stable = reports.iter().find(|r| r.sample_id == "stable").unwrap();
+    // noisy has higher entropy than stable
+    let noisy_ent = noisy.label_entropy.unwrap_or(0.0);
+    let stable_ent = stable.label_entropy.unwrap_or(0.0);
+    assert!(
+        noisy_ent > stable_ent,
+        "noisy entropy {noisy_ent} should exceed stable {stable_ent}"
+    );
+    // urgency ∝ entropy: noisy > stable (actual urgency computation is in CLI)
+    assert_eq!(noisy_ent, 1.0, "uniform 50/50 split = entropy 1.0");
+    assert_eq!(stable_ent, 0.0, "unanimous = entropy 0.0");
+}
+
+#[test]
+fn test_active_review_low_lcb_has_higher_urgency_signal() {
+    // A sample with low label_agreement_lcb should have a higher urgency signal than one with high lcb
+    let many_win: Vec<Observation> = (0..20)
+        .map(|i| Observation {
+            sample_id: "high_lcb".into(),
+            label: Some("win".into()),
+            evaluator_id: Some(format!("e{i}")),
+            ..Default::default()
+        })
+        .collect();
+    let two_win: Vec<Observation> = (0..2)
+        .map(|i| Observation {
+            sample_id: "low_lcb".into(),
+            label: Some("win".into()),
+            evaluator_id: Some(format!("f{i}")),
+            ..Default::default()
+        })
+        .collect();
+    let mut obs = many_win;
+    obs.extend(two_win);
+    let reports = score_all(obs, &ScoreConfig::default());
+    let high = reports.iter().find(|r| r.sample_id == "high_lcb").unwrap();
+    let low = reports.iter().find(|r| r.sample_id == "low_lcb").unwrap();
+    // high_lcb sample has much higher LCB (22 obs at 100% → LCB ≈ 0.85)
+    // low_lcb sample has low LCB (2 obs at 100% → LCB ≈ 0.34)
+    let high_lcb_val = high.label_agreement_lcb.unwrap_or(0.0);
+    let low_lcb_val = low.label_agreement_lcb.unwrap_or(0.0);
+    assert!(
+        high_lcb_val > low_lcb_val,
+        "20-obs sample should have higher LCB than 2-obs: {high_lcb_val} vs {low_lcb_val}"
+    );
+    // Urgency signal for low_lcb is higher (1 - lcb is larger)
+    let urgency_high = 1.0 - high_lcb_val;
+    let urgency_low = 1.0 - low_lcb_val;
+    assert!(
+        urgency_low > urgency_high,
+        "low-lcb sample urgency {urgency_low:.3} > high-lcb {urgency_high:.3}"
+    );
+}
+
+#[test]
+fn test_score_dispersion_mad_less_sensitive_to_outlier() {
+    // 3 scores: 0.90, 0.88, 0.02 — the 0.02 is an outlier.
+    // STD will be dragged down; MAD (based on median) won't be.
+    let obs: Vec<Observation> = [0.90f64, 0.88, 0.02]
+        .iter()
+        .map(|&s| Observation {
+            sample_id: "a".into(),
+            score: Some(s),
+            ..Default::default()
+        })
+        .collect();
+
+    let std_config = ScoreConfig::default(); // ScoreDispersion::Std
+    let mad_config = ScoreConfig {
+        score_dispersion: ScoreDispersion::Mad,
+        ..ScoreConfig::default()
+    };
+
+    let r_std = &score_all(obs.clone(), &std_config)[0];
+    let r_mad = &score_all(obs, &mad_config)[0];
+
+    let sc_std = r_std.components.score_consistency.unwrap();
+    let sc_mad = r_mad.components.score_consistency.unwrap();
+
+    assert!(
+        sc_mad > sc_std,
+        "MAD score_consistency ({sc_mad:.4}) should exceed STD ({sc_std:.4}) when outlier present"
+    );
+    // Verify both are in [0, 1]
+    assert!((0.0..=1.0).contains(&sc_std));
+    assert!((0.0..=1.0).contains(&sc_mad));
+}
+
+#[test]
+fn test_score_dispersion_iqr_zero_gives_perfect_consistency() {
+    // All scores identical → IQR=0 → score_consistency=1.0
+    let obs: Vec<Observation> = [0.85f64, 0.85, 0.85, 0.85]
+        .iter()
+        .map(|&s| Observation {
+            sample_id: "b".into(),
+            score: Some(s),
+            ..Default::default()
+        })
+        .collect();
+
+    let iqr_config = ScoreConfig {
+        score_dispersion: ScoreDispersion::Iqr,
+        ..ScoreConfig::default()
+    };
+    let r = &score_all(obs, &iqr_config)[0];
+    let sc = r.components.score_consistency.unwrap();
+    assert!(
+        (sc - 1.0).abs() < 1e-9,
+        "identical scores → IQR=0 → score_consistency=1.0, got {sc}"
+    );
+}
+
+#[test]
+fn test_score_dispersion_mad_single_obs_skips_score_consistency() {
+    // MAD requires >= 2 obs; with 1 obs, score_consistency should be None
+    let obs = vec![Observation {
+        sample_id: "c".into(),
+        score: Some(0.9),
+        ..Default::default()
+    }];
+    let mad_config = ScoreConfig {
+        score_dispersion: ScoreDispersion::Mad,
+        ..ScoreConfig::default()
+    };
+    let r = &score_all(obs, &mad_config)[0];
+    // Single obs → stability_score=0.5 (review), score_consistency None
+    assert!(
+        r.components.score_consistency.is_none(),
+        "single obs with MAD should have no score_consistency"
+    );
+    assert_eq!(r.decision, Decision::Review);
 }

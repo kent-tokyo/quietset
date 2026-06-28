@@ -1,8 +1,21 @@
 use crate::decision::{Thresholds, decide};
 use crate::observation::Observation;
 use crate::schema::{StabilityComponents, StabilityReport};
+use indexmap::IndexMap;
 use ordered_float::OrderedFloat;
 use std::collections::HashMap;
+
+/// Which dispersion metric drives the `score_consistency` stability component.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ScoreDispersion {
+    /// Standard deviation (default, backward-compatible).
+    #[default]
+    Std,
+    /// Median absolute deviation — more robust to occasional score outliers.
+    Mad,
+    /// Interquartile range — more robust to occasional score outliers.
+    Iqr,
+}
 
 /// Which score value drives the keep / review / drop decision.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -91,6 +104,8 @@ pub struct ScoreConfig {
     pub min_requirements: MinRequirements,
     /// Which score value drives the keep/review/drop threshold comparison.
     pub decision_score: DecisionScore,
+    /// Which dispersion metric drives the score_consistency component. Default: Std.
+    pub score_dispersion: ScoreDispersion,
     /// Confidence level for Wilson LCB. Default 0.95.
     pub confidence_level: f64,
 }
@@ -104,6 +119,7 @@ impl Default for ScoreConfig {
             confidence_k: 3.0,
             min_requirements: MinRequirements::default(),
             decision_score: DecisionScore::Raw,
+            score_dispersion: ScoreDispersion::Std,
             confidence_level: 0.95,
         }
     }
@@ -218,52 +234,63 @@ pub fn compute_report(
 
     // --- label stats ---
     let labels: Vec<&str> = obs.iter().filter_map(|o| o.label.as_deref()).collect();
-    let (majority_label, label_agreement, label_margin, label_entropy, label_agreement_lcb) =
-        if labels.is_empty() {
-            (None, None, None, None, None)
+    let (
+        majority_label,
+        label_agreement,
+        label_margin,
+        label_entropy,
+        label_agreement_lcb,
+        label_distribution,
+    ) = if labels.is_empty() {
+        (None, None, None, None, None, None)
+    } else {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for l in &labels {
+            *counts.entry(l).or_insert(0) += 1;
+        }
+        // Sort: count desc, then label asc (deterministic tiebreak)
+        let mut sorted: Vec<(&str, usize)> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+
+        let total = labels.len();
+        let majority = sorted[0].0;
+        let majority_count = sorted[0].1;
+
+        let agreement = Some(majority_count as f64 / total as f64);
+        let margin = if sorted.len() >= 2 {
+            Some((majority_count - sorted[1].1) as f64 / total as f64)
         } else {
-            let mut counts: HashMap<&str, usize> = HashMap::new();
-            for l in &labels {
-                *counts.entry(l).or_insert(0) += 1;
-            }
-            // Sort: count desc, then label asc (deterministic tiebreak)
-            let mut sorted: Vec<(&str, usize)> = counts.into_iter().collect();
-            sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-
-            let total = labels.len();
-            let majority = sorted[0].0;
-            let majority_count = sorted[0].1;
-
-            let agreement = Some(majority_count as f64 / total as f64);
-            let margin = if sorted.len() >= 2 {
-                Some((majority_count - sorted[1].1) as f64 / total as f64)
-            } else {
-                Some(1.0) // only one label type
-            };
-            let entropy = {
-                let h: f64 = sorted
-                    .iter()
-                    .map(|(_, c)| {
-                        let p = *c as f64 / total as f64;
-                        if p > 0.0 { -p * p.log2() } else { 0.0 }
-                    })
-                    .sum();
-                let max_h = (sorted.len() as f64).log2().max(1.0);
-                Some(if sorted.len() > 1 { h / max_h } else { 0.0 })
-            };
-            let label_agreement_lcb = Some(wilson_lcb(
-                majority_count,
-                labels.len(),
-                config.confidence_level,
-            ));
-            (
-                Some(majority.to_string()),
-                agreement,
-                margin,
-                entropy,
-                label_agreement_lcb,
-            )
+            Some(1.0) // only one label type
         };
+        let entropy = {
+            let h: f64 = sorted
+                .iter()
+                .map(|(_, c)| {
+                    let p = *c as f64 / total as f64;
+                    if p > 0.0 { -p * p.log2() } else { 0.0 }
+                })
+                .sum();
+            let max_h = (sorted.len() as f64).log2().max(1.0);
+            Some(if sorted.len() > 1 { h / max_h } else { 0.0 })
+        };
+        let label_agreement_lcb = Some(wilson_lcb(
+            majority_count,
+            labels.len(),
+            config.confidence_level,
+        ));
+        let dist: IndexMap<String, f64> = sorted
+            .iter()
+            .map(|(l, c)| (l.to_string(), *c as f64 / total as f64))
+            .collect();
+        (
+            Some(majority.to_string()),
+            agreement,
+            margin,
+            entropy,
+            label_agreement_lcb,
+            Some(dist),
+        )
+    };
 
     // --- score stats ---
     let scores: Vec<f64> = obs.iter().filter_map(|o| o.score).collect();
@@ -328,8 +355,13 @@ pub fn compute_report(
             wsum += la * w.label_agreement;
             wtotal += w.label_agreement;
         }
-        if let Some(std) = score_std {
-            wsum += (1.0 - (std / config.score_scale).min(1.0)) * w.score_stability;
+        let dispersion_val = match config.score_dispersion {
+            ScoreDispersion::Std => score_std,
+            ScoreDispersion::Mad => score_mad,
+            ScoreDispersion::Iqr => score_iqr,
+        };
+        if let Some(d) = dispersion_val {
+            wsum += (1.0 - (d / config.score_scale).min(1.0)) * w.score_stability;
             wtotal += w.score_stability;
         }
         if let Some(bs) = budget_sensitivity {
@@ -400,7 +432,14 @@ pub fn compute_report(
 
     let components = StabilityComponents {
         label: label_agreement,
-        score_consistency: score_std.map(|s| 1.0 - (s / config.score_scale).min(1.0)),
+        score_consistency: {
+            let dv = match config.score_dispersion {
+                ScoreDispersion::Std => score_std,
+                ScoreDispersion::Mad => score_mad,
+                ScoreDispersion::Iqr => score_iqr,
+            };
+            dv.map(|d| 1.0 - (d / config.score_scale).min(1.0))
+        },
         budget_robustness: budget_sensitivity.map(|b| 1.0 - b),
         seed_robustness: seed_sensitivity.map(|s| 1.0 - s),
         model_agreement,
@@ -415,6 +454,11 @@ pub fn compute_report(
         label_agreement_lcb,
         label_margin,
         label_entropy,
+        label_distribution,
+        weighted_majority_label: None,
+        weighted_label_confidence: None,
+        weighted_label_distribution: None,
+        majority_weighted_conflict: None,
         score_mean,
         score_std,
         score_range,
@@ -735,6 +779,98 @@ pub fn compute_calibration(
         }
     }
     None
+}
+
+/// Compute per-evaluator reliability weights from observations against a truth map.
+///
+/// `truth` maps `sample_id` → correct label (gold_label if available, else majority_label).
+/// Weight = smoothed accuracy: `(matches + 0.5) / (total + 1)`.
+/// Evaluators not present in observations get no entry; callers should default to 1.0.
+pub fn compute_evaluator_weights(
+    observations: &[Observation],
+    truth: &HashMap<String, String>,
+) -> HashMap<String, f64> {
+    let mut counts: HashMap<&str, (usize, usize)> = HashMap::new(); // (matches, total)
+    for obs in observations {
+        if let (Some(eval_id), Some(label)) = (obs.evaluator_id.as_deref(), obs.label.as_deref())
+            && let Some(true_label) = truth.get(&obs.sample_id)
+        {
+            let entry = counts.entry(eval_id).or_insert((0, 0));
+            entry.1 += 1;
+            if label == true_label.as_str() {
+                entry.0 += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(id, (matches, total))| {
+            let w = (matches as f64 + 0.5) / (total as f64 + 1.0);
+            (id.to_string(), w)
+        })
+        .collect()
+}
+
+/// Compute reliability-weighted majority label for one sample's observations.
+///
+/// Returns `(weighted_majority_label, weighted_label_confidence, weighted_label_distribution, majority_weighted_conflict)`.
+/// Observations without `evaluator_id` use weight 1.0 (neutral).
+/// Returns all-None if no labeled observations exist.
+#[allow(clippy::type_complexity)]
+pub fn compute_weighted_majority(
+    obs: &[Observation],
+    majority_label: Option<&str>,
+    evaluator_weights: &HashMap<String, f64>,
+) -> (
+    Option<String>,
+    Option<f64>,
+    Option<IndexMap<String, f64>>,
+    Option<bool>,
+) {
+    let labeled: Vec<(&str, f64)> = obs
+        .iter()
+        .filter_map(|o| {
+            let label = o.label.as_deref()?;
+            let w = o
+                .evaluator_id
+                .as_deref()
+                .and_then(|id| evaluator_weights.get(id))
+                .copied()
+                .unwrap_or(1.0);
+            Some((label, w))
+        })
+        .collect();
+
+    if labeled.is_empty() {
+        return (None, None, None, None);
+    }
+
+    let mut weighted: HashMap<&str, f64> = HashMap::new();
+    for (label, w) in &labeled {
+        *weighted.entry(label).or_insert(0.0) += w;
+    }
+
+    let total: f64 = weighted.values().sum();
+    if total == 0.0 {
+        return (None, None, None, None);
+    }
+
+    let mut sorted: Vec<(&str, f64)> = weighted.into_iter().collect();
+    sorted.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(b.0))
+    });
+
+    let wml = sorted[0].0.to_string();
+    let wlc = sorted[0].1 / total;
+    let wld: IndexMap<String, f64> = sorted
+        .iter()
+        .map(|(l, w)| (l.to_string(), w / total))
+        .collect();
+    let conflict = majority_label.map(|ml| ml != wml.as_str());
+
+    (Some(wml), Some(wlc), Some(wld), conflict)
 }
 
 /// Compute per-evaluator reliability: fraction of evaluations matching the sample's majority label.

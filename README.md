@@ -316,6 +316,13 @@ By default, decisions use `stability_score`. Three decision modes are available:
 | score <= 0.40 | drop |
 | otherwise | review |
 
+The defaults — 0.85 keep, 0.40 drop — were chosen to leave a deliberate review band.
+0.85 requires strong agreement across most observations before a sample is trusted;
+0.40 only rejects samples with clear, consistent disagreement. Everything between
+is uncertain enough to warrant human review rather than an automatic decision.
+For high-stakes training data, raise `--keep-threshold` to 0.90–0.95. For noisy
+synthetic data where volume matters more than purity, lower it to 0.75–0.80.
+
 Configurable via `--keep-threshold` and `--drop-threshold`. Use `--confidence-level` to tune the
 Wilson LCB confidence level (default 0.95).
 
@@ -716,6 +723,23 @@ if let Some(report) = scorer.flush() { println!("{:?}", report.decision); }
 | **Great Expectations / Soda** | Data quality frameworks that validate data against rules (nulls, ranges, schema). | Those tools check whether data *conforms to a schema*. quietset checks whether labels or scores are *consistent across repeated evaluations*. |
 | **scipy.stats / sklearn metrics** | Statistical functions such as Cohen's kappa and Fleiss' kappa. | quietset wraps similar ideas into a composable pipeline primitive with JSONL I/O, per-sample reports, confidence adjustment, and configurable thresholds. |
 | **LLM evaluation frameworks (RAGAS, DeepEval)** | Frameworks that score LLM outputs against reference answers using model-based judges. | quietset is judge-agnostic. It takes whatever scores or labels your judges produce and measures agreement across runs, budgets, models, or seeds. |
+
+## Python bindings
+
+`crates/quietset-py` provides Python bindings via [pyo3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/).
+Status: **alpha / experimental** — the core scoring API is wrapped but the interface may change.
+
+```bash
+cd crates/quietset-py && maturin develop
+```
+
+```python
+import quietset
+reports = quietset.score_all(observations)
+```
+
+The CLI is the stable interface; use Python bindings for embedding in existing Python pipelines
+where spawning a subprocess is impractical.
 
 ## License
 

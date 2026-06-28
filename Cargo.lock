@@ -349,6 +349,8 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -486,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "quietset"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "csv",
@@ -499,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "quietset-cli"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",

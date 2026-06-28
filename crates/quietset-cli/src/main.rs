@@ -8,9 +8,10 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use quietset::{
-    Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights,
-    StabilityReport, Thresholds, compute_calibration, compute_evaluator_reliability,
+    Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreDispersion,
+    ScoreWeights, StabilityReport, Thresholds, compute_calibration, compute_evaluator_reliability,
     compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv, parse_jsonl, score_all,
+    score_all_weighted,
 };
 
 #[derive(Parser)]
@@ -44,6 +45,10 @@ enum Commands {
     StableWrongRisk(StableWrongRiskArgs),
     /// Find a keep_threshold matching a precision or coverage target using gold labels
     Calibrate(CalibrateArgs),
+    /// Sweep keep_threshold values and show the precision/coverage trade-off table
+    Policy(PolicyArgs),
+    /// Rank scored samples by re-evaluation urgency
+    ActiveReview(ActiveReviewArgs),
 }
 
 #[derive(ValueEnum, Clone)]
@@ -59,10 +64,28 @@ enum ProfileArg {
     LlmJudge,
     /// Simulation: weight budget and seed robustness 2×; default decision-score adjusted.
     Simulation,
-    /// Game/search AI: weight budget 2×, seed 1.5×; default decision-score adjusted; min-observations 3.
+    /// Game/search AI: weight budget 2×, seed 2×; default decision-score lcb; min-observations 4, min-budgets 2, min-seeds 2.
     GameAi,
     /// Benchmark curation: weight label 2×, evaluator 1.5×; default decision-score raw.
     Benchmark,
+}
+
+#[derive(ValueEnum, Clone)]
+enum VoteArg {
+    /// Standard majority vote (default).
+    Raw,
+    /// Reliability-weighted vote using per-evaluator accuracy (2-pass).
+    Weighted,
+}
+
+#[derive(ValueEnum, Clone)]
+enum DispersionArg {
+    /// Standard deviation (default, backward-compatible).
+    Std,
+    /// Median absolute deviation — more robust to occasional outlier scores.
+    Mad,
+    /// Interquartile range — more robust to occasional outlier scores.
+    Iqr,
 }
 
 #[derive(clap::Args)]
@@ -176,6 +199,15 @@ struct ScoreArgs {
     /// Apply a use-case preset. Explicit --weight-* and --decision-score flags override the preset.
     #[arg(long, value_enum)]
     profile: Option<ProfileArg>,
+
+    /// Vote aggregation mode: raw (default) or weighted (uses per-evaluator reliability, 2-pass).
+    #[arg(long, default_value = "raw", value_enum)]
+    vote: VoteArg,
+
+    /// Dispersion metric for score_consistency: std (default), mad, or iqr.
+    /// mad/iqr are more robust when occasional outlier scores are present.
+    #[arg(long, default_value = "std", value_enum)]
+    score_dispersion: DispersionArg,
 }
 
 #[derive(clap::Args)]
@@ -404,6 +436,60 @@ struct CalibrateArgs {
     confidence_level: f64,
 }
 
+#[derive(clap::Args)]
+struct PolicyArgs {
+    /// Input observation JSONL (same format as `score`). Use '-' for stdin.
+    #[arg(default_value = "-")]
+    input: String,
+    #[arg(long)]
+    skip_invalid: bool,
+    /// Decision score mode: raw (default), adjusted, or lcb.
+    #[arg(long, value_enum)]
+    decision_score: Option<DecisionScoreArg>,
+    /// Confidence level for Wilson LCB. Default 0.95.
+    #[arg(long, default_value_t = 0.95)]
+    confidence_level: f64,
+    /// Report the loosest threshold that meets this precision target.
+    #[arg(long)]
+    target_precision: Option<f64>,
+    /// Report the loosest threshold that meets this coverage target.
+    #[arg(long)]
+    target_coverage: Option<f64>,
+    /// Output machine-readable JSONL instead of a formatted table.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ActiveReviewArgs {
+    /// Input scored JSONL (output of `score`). Use '-' for stdin.
+    #[arg(default_value = "-")]
+    input: String,
+    #[arg(long)]
+    skip_invalid: bool,
+    /// Only output review and drop samples (skip keep with no issues).
+    #[arg(long)]
+    unstable_only: bool,
+    /// Maximum number of samples to output (default: all).
+    #[arg(long)]
+    top: Option<usize>,
+    /// Weight for low-LCB signal (1 - label_agreement_lcb).
+    #[arg(long, default_value_t = 1.0)]
+    weight_lcb: f64,
+    /// Weight for high-entropy signal.
+    #[arg(long, default_value_t = 1.0)]
+    weight_entropy: f64,
+    /// Weight for high-score-mad signal.
+    #[arg(long, default_value_t = 1.0)]
+    weight_score_mad: f64,
+    /// Weight for high-budget-sensitivity signal.
+    #[arg(long, default_value_t = 1.0)]
+    weight_budget_sensitivity: f64,
+    /// Weight for high-seed-sensitivity signal.
+    #[arg(long, default_value_t = 1.0)]
+    weight_seed_sensitivity: f64,
+}
+
 #[derive(ValueEnum, Clone, Debug)]
 enum Format {
     Jsonl,
@@ -551,6 +637,8 @@ fn main() -> Result<()> {
         Commands::Recommend(args) => run_recommend(args),
         Commands::StableWrongRisk(args) => run_stable_wrong_risk(args),
         Commands::Calibrate(args) => run_calibrate(args),
+        Commands::Policy(args) => run_policy(args),
+        Commands::ActiveReview(args) => run_active_review(args),
     }
 }
 
@@ -602,7 +690,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
         },
         Some(ProfileArg::GameAi) => ScoreWeights {
             budget_stability: 2.0,
-            seed_stability: 1.5,
+            seed_stability: 2.0,
             ..ScoreWeights::default()
         },
         Some(ProfileArg::Benchmark) => ScoreWeights {
@@ -614,14 +702,14 @@ fn run_score(args: ScoreArgs) -> Result<()> {
     };
     let profile_decision: Option<DecisionScoreArg> = match &args.profile {
         Some(ProfileArg::LlmJudge) => Some(DecisionScoreArg::Lcb),
-        Some(ProfileArg::Simulation) | Some(ProfileArg::GameAi) => Some(DecisionScoreArg::Adjusted),
+        Some(ProfileArg::Simulation) => Some(DecisionScoreArg::Adjusted),
+        Some(ProfileArg::GameAi) => Some(DecisionScoreArg::Lcb),
         _ => None,
     };
-    let profile_min_obs: usize = if matches!(args.profile, Some(ProfileArg::GameAi)) {
-        3
-    } else {
-        0
-    };
+    let is_game_ai = matches!(args.profile, Some(ProfileArg::GameAi));
+    let profile_min_obs: usize = if is_game_ai { 4 } else { 0 };
+    let profile_min_budgets: usize = if is_game_ai { 2 } else { 0 };
+    let profile_min_seeds: usize = if is_game_ai { 2 } else { 0 };
     let config = ScoreConfig {
         score_scale: args.score_scale,
         thresholds: Thresholds {
@@ -642,8 +730,8 @@ fn run_score(args: ScoreArgs) -> Result<()> {
         min_requirements: MinRequirements {
             observations: args.min_observations_keep.max(profile_min_obs),
             evaluators: args.min_evaluators_keep,
-            seeds: args.min_seeds_keep,
-            budgets: args.min_budgets_keep,
+            seeds: args.min_seeds_keep.max(profile_min_seeds),
+            budgets: args.min_budgets_keep.max(profile_min_budgets),
             models: args.min_models_keep,
         },
         // --decision-score wins; profile default next; --use-* are backwards-compat aliases (fallback only)
@@ -658,10 +746,18 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             (None, _) if args.use_adjusted_score => DecisionScore::Adjusted,
             _ => DecisionScore::Raw,
         },
+        score_dispersion: match args.score_dispersion {
+            DispersionArg::Std => ScoreDispersion::Std,
+            DispersionArg::Mad => ScoreDispersion::Mad,
+            DispersionArg::Iqr => ScoreDispersion::Iqr,
+        },
         confidence_level: args.confidence_level,
     };
     config.validate().context("invalid configuration")?;
-    let reports = score_all(observations.clone(), &config);
+    let reports = match args.vote {
+        VoteArg::Raw => score_all(observations.clone(), &config),
+        VoteArg::Weighted => score_all_weighted(observations.clone(), &config),
+    };
 
     if args.estimate_evaluator_reliability {
         let reliability = compute_evaluator_reliability(&observations, &reports);
@@ -2002,4 +2098,334 @@ fn driver_label(name: &str) -> &str {
         "evaluator_agreement" => "evaluator disagreement",
         other => other,
     }
+}
+
+fn run_policy(args: PolicyArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let observations = if args.skip_invalid {
+        let mut obs = Vec::new();
+        for (i, line) in raw.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.contains("\"_quietset_stats\"") {
+                continue;
+            }
+            match serde_json::from_str::<Observation>(line) {
+                Ok(o) => match o.validate(i + 1) {
+                    Ok(()) => obs.push(o),
+                    Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+                },
+                Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+            }
+        }
+        obs
+    } else {
+        parse_jsonl(&raw).context("parsing JSONL")?
+    };
+    if observations.is_empty() {
+        anyhow::bail!("no observations found");
+    }
+
+    let decision_score = match args.decision_score {
+        Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
+        Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
+        Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
+    };
+
+    // Score with keep=0 to obtain all samples' stability scores
+    let config = ScoreConfig {
+        thresholds: Thresholds {
+            keep: 0.0,
+            drop: -1.0,
+        },
+        decision_score: decision_score.clone(),
+        confidence_level: args.confidence_level,
+        ..ScoreConfig::default()
+    };
+    let reports = score_all(observations.clone(), &config);
+    let n_total = reports.len();
+    if n_total == 0 {
+        anyhow::bail!("no samples scored");
+    }
+
+    let gold: std::collections::HashMap<&str, &str> = observations
+        .iter()
+        .filter_map(|o| o.gold_label.as_deref().map(|g| (o.sample_id.as_str(), g)))
+        .collect();
+    let has_gold = !gold.is_empty();
+
+    let score_val = |r: &StabilityReport| match &decision_score {
+        DecisionScore::Adjusted => r.adjusted_stability_score,
+        _ => r.stability_score,
+    };
+
+    struct Row {
+        threshold: f64,
+        n_keep: usize,
+        coverage: f64,
+        precision: Option<f64>,
+        stable_wrong_rate: Option<f64>,
+    }
+
+    let mut rows: Vec<Row> = Vec::new();
+    for i in 0..=49usize {
+        let t = 0.99 - i as f64 * 0.01;
+        let kept: Vec<&StabilityReport> = reports.iter().filter(|r| score_val(r) >= t).collect();
+        let n_keep = kept.len();
+        let coverage = n_keep as f64 / n_total as f64;
+
+        let (precision, stable_wrong_rate) = if has_gold && n_keep > 0 {
+            let matches = kept
+                .iter()
+                .filter(|r| {
+                    gold.get(r.sample_id.as_str())
+                        .and_then(|&g| r.majority_label.as_deref().map(|m| m == g))
+                        .unwrap_or(false)
+                })
+                .count();
+            let wrong = kept
+                .iter()
+                .filter(|r| {
+                    r.majority_label
+                        .as_deref()
+                        .and_then(|ml| gold.get(r.sample_id.as_str()).map(|&g| ml != g))
+                        .unwrap_or(false)
+                })
+                .count();
+            (
+                Some(matches as f64 / n_keep as f64),
+                Some(wrong as f64 / n_keep as f64),
+            )
+        } else {
+            (None, None)
+        };
+
+        rows.push(Row {
+            threshold: t,
+            n_keep,
+            coverage,
+            precision,
+            stable_wrong_rate,
+        });
+    }
+
+    // Find best thresholds (loosest that meets target, from high→low)
+    let best_prec_idx = args.target_precision.and_then(|tp| {
+        rows.iter()
+            .rposition(|r| r.precision.is_some_and(|p| p >= tp))
+    });
+    let best_cov_idx = args
+        .target_coverage
+        .and_then(|tc| rows.iter().rposition(|r| r.coverage >= tc));
+    let best_idx = best_prec_idx.or(best_cov_idx);
+
+    if args.json {
+        for (i, row) in rows.iter().enumerate() {
+            let mut obj = serde_json::Map::new();
+            obj.insert("threshold".into(), serde_json::json!(row.threshold));
+            obj.insert("n_keep".into(), serde_json::json!(row.n_keep));
+            obj.insert("coverage".into(), serde_json::json!(row.coverage));
+            if let Some(p) = row.precision {
+                obj.insert("precision".into(), serde_json::json!(p));
+            }
+            if let Some(s) = row.stable_wrong_rate {
+                obj.insert("stable_wrong_rate".into(), serde_json::json!(s));
+            }
+            if Some(i) == best_idx {
+                obj.insert("best".into(), serde_json::json!(true));
+            }
+            println!("{}", serde_json::to_string(&obj)?);
+        }
+    } else {
+        if has_gold {
+            println!(
+                "{:<9}  {:>6}  {:>8}  {:>9}  {:>18}",
+                "threshold", "n_keep", "coverage", "precision", "stable_wrong_rate"
+            );
+        } else {
+            println!("{:<9}  {:>6}  {:>8}", "threshold", "n_keep", "coverage");
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let marker = if Some(i) == best_idx { " ←" } else { "" };
+            if has_gold {
+                println!(
+                    "{:<9.2}  {:>6}  {:>8.3}  {:>9}  {:>18}{}",
+                    row.threshold,
+                    row.n_keep,
+                    row.coverage,
+                    row.precision
+                        .map(|p| format!("{p:.3}"))
+                        .unwrap_or_else(|| "-".into()),
+                    row.stable_wrong_rate
+                        .map(|r| format!("{r:.3}"))
+                        .unwrap_or_else(|| "-".into()),
+                    marker
+                );
+            } else {
+                println!(
+                    "{:<9.2}  {:>6}  {:>8.3}{}",
+                    row.threshold, row.n_keep, row.coverage, marker
+                );
+            }
+        }
+        if let (Some(tp), Some(idx)) = (args.target_precision, best_prec_idx) {
+            println!(
+                "\nbest (precision >= {tp:.2}): threshold={:.2}, coverage={:.3}",
+                rows[idx].threshold, rows[idx].coverage
+            );
+        } else if args.target_precision.is_some() {
+            println!("\nno threshold in [0.50, 0.99] meets precision target");
+        }
+        if let (Some(tc), Some(idx)) = (args.target_coverage, best_cov_idx) {
+            println!(
+                "\nbest (coverage >= {tc:.2}): threshold={:.2}, n_keep={}",
+                rows[idx].threshold, rows[idx].n_keep
+            );
+        } else if args.target_coverage.is_some() {
+            println!("\nno threshold in [0.50, 0.99] meets coverage target");
+        }
+    }
+    Ok(())
+}
+
+fn run_active_review(args: ActiveReviewArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let mut reports: Vec<StabilityReport> = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.contains("\"_quietset_stats\"") {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(r) => reports.push(r),
+            Err(e) => {
+                if args.skip_invalid {
+                    eprintln!("warning: skipping line {}: {e}", i + 1);
+                } else {
+                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
+                }
+            }
+        }
+    }
+    if reports.is_empty() {
+        anyhow::bail!("no records found");
+    }
+
+    struct Entry {
+        urgency: f64,
+        sample_id: String,
+        value: serde_json::Value,
+    }
+
+    let mut entries: Vec<Entry> = Vec::new();
+    for r in &reports {
+        if args.unstable_only && r.decision == Decision::Keep {
+            continue;
+        }
+
+        let signals: &[(&'static str, f64, &'static str)] = &[
+            (
+                "low_lcb",
+                r.label_agreement_lcb
+                    .map(|v| (1.0 - v) * args.weight_lcb)
+                    .unwrap_or(0.0),
+                "add_observations",
+            ),
+            (
+                "high_entropy",
+                r.label_entropy
+                    .map(|v| v * args.weight_entropy)
+                    .unwrap_or(0.0),
+                "diversify_evaluators",
+            ),
+            (
+                "high_score_mad",
+                r.score_mad
+                    .map(|v| v.min(1.0) * args.weight_score_mad)
+                    .unwrap_or(0.0),
+                "reduce_score_variance",
+            ),
+            (
+                "high_budget_sensitivity",
+                r.budget_sensitivity
+                    .map(|v| v * args.weight_budget_sensitivity)
+                    .unwrap_or(0.0),
+                "add_budget",
+            ),
+            (
+                "high_seed_sensitivity",
+                r.seed_sensitivity
+                    .map(|v| v * args.weight_seed_sensitivity)
+                    .unwrap_or(0.0),
+                "add_seeds",
+            ),
+        ];
+
+        let total_w: f64 = [
+            r.label_agreement_lcb
+                .map(|_| args.weight_lcb)
+                .unwrap_or(0.0),
+            r.label_entropy.map(|_| args.weight_entropy).unwrap_or(0.0),
+            r.score_mad.map(|_| args.weight_score_mad).unwrap_or(0.0),
+            r.budget_sensitivity
+                .map(|_| args.weight_budget_sensitivity)
+                .unwrap_or(0.0),
+            r.seed_sensitivity
+                .map(|_| args.weight_seed_sensitivity)
+                .unwrap_or(0.0),
+        ]
+        .iter()
+        .sum();
+
+        let raw_sum: f64 = signals.iter().map(|(_, v, _)| v).sum();
+        let urgency = if total_w > 0.0 {
+            raw_sum / total_w
+        } else {
+            0.0
+        };
+
+        let (primary_reason, _, suggested_action) = signals
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap();
+
+        let mut obj = serde_json::Map::new();
+        obj.insert("sample_id".into(), serde_json::json!(r.sample_id));
+        obj.insert("urgency_score".into(), serde_json::json!(urgency));
+        obj.insert("primary_reason".into(), serde_json::json!(primary_reason));
+        obj.insert(
+            "suggested_action".into(),
+            serde_json::json!(suggested_action),
+        );
+        if let Some(v) = r.label_agreement_lcb {
+            obj.insert("label_agreement_lcb".into(), serde_json::json!(v));
+        }
+        if let Some(v) = r.label_entropy {
+            obj.insert("label_entropy".into(), serde_json::json!(v));
+        }
+        if let Some(v) = r.budget_sensitivity {
+            obj.insert("budget_sensitivity".into(), serde_json::json!(v));
+        }
+        if let Some(v) = r.seed_sensitivity {
+            obj.insert("seed_sensitivity".into(), serde_json::json!(v));
+        }
+
+        entries.push(Entry {
+            urgency,
+            sample_id: r.sample_id.clone(),
+            value: serde_json::Value::Object(obj),
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.urgency
+            .partial_cmp(&a.urgency)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.sample_id.cmp(&b.sample_id))
+    });
+
+    let take = args.top.unwrap_or(entries.len());
+    for e in entries.iter().take(take) {
+        println!("{}", serde_json::to_string(&e.value)?);
+    }
+    Ok(())
 }
