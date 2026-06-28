@@ -36,6 +36,8 @@ enum Commands {
     Reliability(ReliabilityArgs),
     /// Deep diagnostic report for a scored JSONL file
     Audit(AuditArgs),
+    /// Extract samples by diagnostic class for human review queues
+    Select(SelectArgs),
     /// Suggest which samples to re-evaluate and why
     Recommend(RecommendArgs),
     /// Compute the fraction of kept samples that are stably wrong (requires gold_label)
@@ -304,6 +306,44 @@ struct AuditArgs {
     skip_invalid: bool,
     #[arg(long, default_value_t = 0.85)]
     keep_threshold: f64,
+    /// Optional observation JSONL for dataset-level agreement stats (Fleiss kappa, Krippendorff alpha).
+    #[arg(long)]
+    observations: Option<String>,
+}
+
+#[derive(ValueEnum, Clone)]
+enum SelectClass {
+    /// Samples in the uncertainty band (0.75 <= stability <= 0.95).
+    Borderline,
+    /// Samples sorted by disagreement_score descending.
+    HighDisagreement,
+    /// Samples sorted by budget_sensitivity descending.
+    BudgetSensitive,
+    /// Samples sorted by seed_sensitivity descending.
+    SeedSensitive,
+    /// Samples with stability >= keep_threshold but label_agreement_lcb < keep_threshold.
+    HighRawLowLcb,
+    /// Samples sorted by score_mad descending.
+    HighScoreMad,
+}
+
+#[derive(clap::Args)]
+struct SelectArgs {
+    /// Input scored JSONL file. Use '-' for stdin.
+    #[arg(default_value = "-")]
+    input: String,
+    /// Class of samples to extract.
+    #[arg(long, value_enum)]
+    class: SelectClass,
+    /// Maximum number of samples to output. Default: all matching samples.
+    #[arg(long)]
+    top: Option<usize>,
+    /// Keep threshold (used by borderline and high-raw-low-lcb classes).
+    #[arg(long, default_value_t = 0.85)]
+    keep_threshold: f64,
+    /// Skip malformed lines.
+    #[arg(long)]
+    skip_invalid: bool,
 }
 
 #[derive(clap::Args)]
@@ -499,6 +539,7 @@ fn main() -> Result<()> {
         Commands::Compare(args) => run_compare(args),
         Commands::Reliability(args) => run_reliability(args),
         Commands::Audit(args) => run_audit(args),
+        Commands::Select(args) => run_select(args),
         Commands::Recommend(args) => run_recommend(args),
         Commands::StableWrongRisk(args) => run_stable_wrong_risk(args),
         Commands::Calibrate(args) => run_calibrate(args),
@@ -1125,6 +1166,14 @@ fn run_compare(args: CompareArgs) -> Result<()> {
 }
 
 fn run_audit(args: AuditArgs) -> Result<()> {
+    // Load optional observation JSONL for agreement stats
+    let agreement_obs: Option<Vec<Observation>> = if let Some(ref path) = args.observations {
+        let raw = read_input(path)?;
+        Some(parse_jsonl(&raw).context("parsing observations JSONL")?)
+    } else {
+        None
+    };
+
     let raw = read_input(&args.input)?;
     let mut reports: Vec<StabilityReport> = Vec::new();
     for (i, line) in raw.lines().enumerate() {
@@ -1285,6 +1334,14 @@ fn run_audit(args: AuditArgs) -> Result<()> {
         if let Some(v) = iqr_mean {
             out["score_iqr_mean"] = serde_json::json!(v);
         }
+        if let Some(ref obs) = agreement_obs {
+            if let Some(k) = compute_fleiss_kappa(obs) {
+                out["fleiss_kappa"] = serde_json::json!(k);
+            }
+            if let Some(a) = compute_krippendorff_alpha(obs) {
+                out["krippendorff_alpha"] = serde_json::json!(a);
+            }
+        }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -1398,6 +1455,126 @@ fn run_audit(args: AuditArgs) -> Result<()> {
                 r.seed_sensitivity.unwrap_or(0.0)
             );
         }
+    }
+    if let Some(ref obs) = agreement_obs {
+        let kappa = compute_fleiss_kappa(obs);
+        let alpha = compute_krippendorff_alpha(obs);
+        if kappa.is_some() || alpha.is_some() {
+            println!();
+            println!("dataset agreement:");
+            if let Some(k) = kappa {
+                println!("  fleiss_kappa:         {:.4}", k);
+            }
+            if let Some(a) = alpha {
+                println!("  krippendorff_alpha:   {:.4}", a);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_select(args: SelectArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let mut lines_and_reports: Vec<(String, StabilityReport)> = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<StabilityReport>(line) {
+            Ok(r) => lines_and_reports.push((line.to_string(), r)),
+            Err(e) => {
+                if args.skip_invalid {
+                    eprintln!("warning: skipping line {}: {e}", i + 1);
+                } else {
+                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
+                }
+            }
+        }
+    }
+    if lines_and_reports.is_empty() {
+        anyhow::bail!("no records found");
+    }
+
+    let kt = args.keep_threshold;
+    // Sort indices by the relevant field for the chosen class
+    let mut indices: Vec<usize> = (0..lines_and_reports.len()).collect();
+
+    match args.class {
+        SelectClass::Borderline => {
+            indices.retain(|&i| {
+                let s = lines_and_reports[i].1.stability_score;
+                (0.75..=0.95).contains(&s)
+            });
+            indices.sort_by(|&a, &b| {
+                lines_and_reports[a]
+                    .1
+                    .stability_score
+                    .partial_cmp(&lines_and_reports[b].1.stability_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        SelectClass::HighDisagreement => {
+            indices.sort_by(|&a, &b| {
+                lines_and_reports[b]
+                    .1
+                    .disagreement_score
+                    .partial_cmp(&lines_and_reports[a].1.disagreement_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        SelectClass::BudgetSensitive => {
+            indices.retain(|&i| lines_and_reports[i].1.budget_sensitivity.is_some());
+            indices.sort_by(|&a, &b| {
+                lines_and_reports[b]
+                    .1
+                    .budget_sensitivity
+                    .unwrap()
+                    .partial_cmp(&lines_and_reports[a].1.budget_sensitivity.unwrap())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        SelectClass::SeedSensitive => {
+            indices.retain(|&i| lines_and_reports[i].1.seed_sensitivity.is_some());
+            indices.sort_by(|&a, &b| {
+                lines_and_reports[b]
+                    .1
+                    .seed_sensitivity
+                    .unwrap()
+                    .partial_cmp(&lines_and_reports[a].1.seed_sensitivity.unwrap())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        SelectClass::HighRawLowLcb => {
+            indices.retain(|&i| {
+                let r = &lines_and_reports[i].1;
+                r.stability_score >= kt && r.label_agreement_lcb.is_some_and(|v| v < kt)
+            });
+            indices.sort_by(|&a, &b| {
+                lines_and_reports[a]
+                    .1
+                    .label_agreement_lcb
+                    .unwrap_or(1.0)
+                    .partial_cmp(&lines_and_reports[b].1.label_agreement_lcb.unwrap_or(1.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        SelectClass::HighScoreMad => {
+            indices.retain(|&i| lines_and_reports[i].1.score_mad.is_some());
+            indices.sort_by(|&a, &b| {
+                lines_and_reports[b]
+                    .1
+                    .score_mad
+                    .unwrap()
+                    .partial_cmp(&lines_and_reports[a].1.score_mad.unwrap())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    let take = args.top.unwrap_or(indices.len());
+    for &i in indices.iter().take(take) {
+        println!("{}", lines_and_reports[i].0);
     }
     Ok(())
 }
