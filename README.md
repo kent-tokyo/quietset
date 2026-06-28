@@ -14,7 +14,7 @@ It is a small stability-filtering primitive designed to compose with other tools
 ## Installation
 
 ```bash
-cargo install --path crates/quietset-cli
+cargo install quietset-cli
 ```
 
 ## CLI examples
@@ -35,11 +35,29 @@ cat runs/*.jsonl | quietset score - > scored.jsonl
 # Aggregate statistics
 quietset summary scored.jsonl
 
+# Machine-readable summary for CI
+quietset summary scored.jsonl --json | jq '.drop_rate < 0.1'
+
+# Explain why a specific sample was scored the way it was
+quietset explain scored.jsonl --sample-id a
+
+# Compare two scored files (e.g. before/after a model update)
+quietset compare before.jsonl after.jsonl
+
+# Per-evaluator reliability (experimental)
+quietset reliability input.jsonl
+
 # CSV output
 quietset score input.jsonl --output-format csv > scored.csv
 
 # Weight label agreement 2x, ignore score variance
 quietset score input.jsonl --weight-labels 2.0 --weight-scores 0.0 > scored.jsonl
+
+# Penalise low-evidence samples: decisions use confidence-adjusted score
+quietset score input.jsonl --use-adjusted-score > scored.jsonl
+
+# Require at least 3 observations and 2 evaluators before Keep
+quietset score input.jsonl --min-observations-keep 3 --min-evaluators-keep 2 > scored.jsonl
 ```
 
 ## Input JSONL format
@@ -53,9 +71,27 @@ quietset score input.jsonl --weight-labels 2.0 --weight-scores 0.0 > scored.json
 
 ## Output JSONL format
 
+Key fields in the output (optional fields are omitted when not computable):
+
 ```json
-{"sample_id":"a","n_observations":2,"majority_label":"win","label_agreement":1.0,"score_mean":0.895,"score_std":0.015,"stability_score":0.97,"decision":"keep"}
-{"sample_id":"b","n_observations":2,"majority_label":"win","label_agreement":0.5,"score_std":0.31,"stability_score":0.42,"decision":"review"}
+{
+  "sample_id": "a",
+  "n_observations": 2,
+  "majority_label": "win",
+  "label_agreement": 1.0,
+  "label_margin": 1.0,
+  "label_entropy": 0.0,
+  "score_mean": 0.895,
+  "score_std": 0.015,
+  "confidence": 0.40,
+  "adjusted_stability_score": 0.782,
+  "stability_score": 0.97,
+  "decision": "keep",
+  "components": {
+    "label": 1.0,
+    "score_consistency": 0.985
+  }
+}
 ```
 
 ## Stability score
@@ -79,7 +115,19 @@ It is the **weighted mean** of available sub-scores (all in `[0.0, 1.0]`):
 Missing dimensions (e.g. no labels, no budgets) are excluded from the mean.
 Single observations receive `stability_score = 0.5` (review by default).
 
-Each sub-score is also exposed in `StabilityReport.components` so you can see why a sample was scored as it was:
+Additional diagnostic fields on `StabilityReport`:
+
+| Field | Meaning |
+|-------|---------|
+| `label_margin` | `(majority_count - runner_up_count) / total`. 0.0 = perfectly split |
+| `label_entropy` | Normalised Shannon entropy [0, 1]. 1.0 = uniform label distribution |
+| `budget_slope` | Score trend as budget increases (positive = converges upward) |
+| `confidence` | `n / (n + k)` — how much to trust the score given evidence count |
+| `adjusted_stability_score` | `stability * confidence + 0.5 * (1 - confidence)` |
+
+### Components field
+
+Each sub-score is also exposed in `components` so you can see why a sample was scored as it was:
 
 ```json
 {
@@ -98,10 +146,41 @@ Use `--weight-*` flags to emphasise dimensions relevant to your pipeline:
 
 ```bash
 # LLM judge: weight evaluator/model agreement more
-quietset score input.jsonl --weight-labels 1.0 --weight-evaluators 2.0 --weight-models 2.0
+quietset score input.jsonl --weight-evaluators 2.0 --weight-models 2.0
 
 # Simulation: weight seed/budget robustness more
 quietset score input.jsonl --weight-seed 2.0 --weight-budget 2.0
+```
+
+## Confidence and adjusted score
+
+`confidence = n / (n + k)` where `k` defaults to 3.0.
+
+| n_observations | confidence (k=3) |
+|---------------|-----------------|
+| 1 | 0.25 |
+| 2 | 0.40 |
+| 5 | 0.63 |
+| 10 | 0.77 |
+| 20 | 0.87 |
+
+`adjusted_stability_score = stability_score * confidence + 0.5 * (1 - confidence)`
+
+A sample with `stability_score = 0.95` but only 2 observations gets `adjusted_stability_score ≈ 0.68` — unlikely to reach the keep threshold (0.85) without more evidence.
+
+Use `--use-adjusted-score` to make decisions based on the adjusted score.
+Use `--confidence-k` to tune the convergence speed.
+
+## Minimum requirements for Keep
+
+High stability does not guarantee sufficient evidence. Use `--min-*-keep` to demote underevidenced samples to Review:
+
+```bash
+quietset score input.jsonl \
+  --min-observations-keep 3 \
+  --min-evaluators-keep 2 \
+  --min-seeds-keep 2 \
+  > scored.jsonl
 ```
 
 ## Decisions
@@ -113,6 +192,104 @@ quietset score input.jsonl --weight-seed 2.0 --weight-budget 2.0
 | otherwise | review |
 
 Configurable via `--keep-threshold` and `--drop-threshold`.
+
+## explain command
+
+Print a detailed breakdown for one sample:
+
+```bash
+quietset explain scored.jsonl --sample-id a
+```
+
+```
+sample_id:          a
+decision:           keep
+n_observations:     3
+stability_score:    0.9700
+confidence:         0.5000
+adjusted_score:     0.7350
+label_margin:       1.0000
+label_entropy:      0.0000
+
+components:
+  label                      1.0000  ████████████████████
+  score_consistency          0.9850  ███████████████████
+  budget_robustness          0.8800  █████████████████
+  seed_robustness            0.9200  ██████████████████
+```
+
+Add `--json` to get the full `StabilityReport` as JSON.
+
+## compare command
+
+Compare two scored JSONL files by `sample_id`:
+
+```bash
+quietset compare before.jsonl after.jsonl
+```
+
+```
+matched samples:  10000
+mean stability:   0.7412 → 0.7801
+
+decision transitions (before → after):
+              →keep   →review    →drop
+      keep↓    7210       311       42
+    review↓     508      2101      301
+      drop↓      19       104      404
+
+top 5 regressions:
+  sample_001  0.9100 → 0.4400  (Δ-0.4700)
+  sample_382  0.8800 → 0.3900  (Δ-0.4900)
+```
+
+Add `--json` for machine-readable output.
+
+## summary command
+
+```bash
+quietset summary scored.jsonl
+```
+
+```
+samples:              1000
+  keep:                621  (62.1%)
+  review:              291  (29.1%)
+  drop:                 88   (8.8%)
+
+stability_score:
+  mean:              0.7412
+  median:            0.7810
+  p10 / p90:         0.4200 / 0.9600
+
+top instability drivers (review + drop samples):
+  label disagreement        38%
+  score variance            24%
+  seed sensitivity          21%
+  budget sensitivity        17%
+```
+
+Use `--json` for CI integration:
+
+```bash
+quietset summary scored.jsonl --json | jq '.drop_rate < 0.1'
+```
+
+## reliability command (experimental)
+
+Estimate per-evaluator reliability from observation JSONL:
+
+```bash
+quietset reliability input.jsonl
+```
+
+```json
+{"evaluator_id": "m1", "reliability": 0.94}
+{"evaluator_id": "m2", "reliability": 0.71}
+{"evaluator_id": "m3", "reliability": 0.52}
+```
+
+Reliability is the fraction of evaluations where the evaluator's label matches the sample's majority label. Use this to identify systematically unreliable evaluators.
 
 ## Rust API
 
@@ -127,16 +304,30 @@ let reports = score_all(obs, &ScoreConfig::default());
 println!("{:?}", reports[0].decision);
 ```
 
+### Streaming API
+
+```rust
+use quietset::{Observation, ScoreConfig, StreamingScorer};
+
+let mut scorer = StreamingScorer::new(ScoreConfig::default());
+for obs in observations {
+    if let Some(report) = scorer.push(obs) {
+        println!("{:?}", report.decision);
+    }
+}
+if let Some(report) = scorer.flush() { println!("{:?}", report.decision); }
+```
+
 ## Compared to adjacent tools
 
 | Tool | What it does | How quietset differs |
 |------|-------------|----------------------|
-| **Cleanlab** | Python library that detects label errors using trained classifiers and confident learning. Works with classification, regression, and NLP tasks. | quietset needs no model training and makes no task-specific assumptions. It filters by cross-run stability rather than by estimated label quality. |
-| **Label Studio** | Web-based annotation platform for labelling images, text, audio, and time series. Supports multi-annotator workflows. | quietset is a CLI/library primitive, not an annotation UI. It consumes labels already produced by other tools and measures how stable they are. |
-| **pandas / polars** | General-purpose data manipulation libraries. Can compute std, groupby, and aggregations. | quietset provides a purpose-built stability schema — `keep / review / drop` decisions, per-dimension sub-scores, instability diagnostics — that would otherwise require substantial custom code. |
-| **Great Expectations / Soda** | Data quality frameworks that validate data against rules (nulls, ranges, schema). | Those tools check whether data *conforms to a schema*. quietset checks whether labels or scores are *consistent across repeated evaluations*. The concerns are orthogonal. |
-| **scipy.stats / sklearn metrics** | Statistical functions such as Cohen's kappa, Fleiss' kappa, and inter-rater agreement. | quietset wraps similar ideas into a composable pipeline primitive with JSONL I/O, per-sample reports, and configurable thresholds. You could replicate it with scipy, but you would need to wire up grouping, normalisation, weighting, and output formatting yourself. |
-| **LLM evaluation frameworks (RAGAS, DeepEval)** | Frameworks that score LLM outputs against reference answers using model-based judges. | quietset is judge-agnostic. It takes *whatever scores or labels your judges produce* and measures agreement across runs, budgets, models, or seeds. It composes with any LLM judge rather than replacing one. |
+| **Cleanlab** | Python library that detects label errors using trained classifiers and confident learning. | quietset needs no model training and makes no task-specific assumptions. It filters by cross-run stability rather than estimated label quality. |
+| **Label Studio** | Web-based annotation platform for labelling images, text, audio, and time series. | quietset is a CLI/library primitive, not an annotation UI. It measures stability of labels already produced by other tools. |
+| **pandas / polars** | General-purpose data manipulation libraries. | quietset provides a purpose-built stability schema — decisions, per-dimension sub-scores, confidence, instability diagnostics — that would otherwise require substantial custom code. |
+| **Great Expectations / Soda** | Data quality frameworks that validate data against rules (nulls, ranges, schema). | Those tools check whether data *conforms to a schema*. quietset checks whether labels or scores are *consistent across repeated evaluations*. |
+| **scipy.stats / sklearn metrics** | Statistical functions such as Cohen's kappa and Fleiss' kappa. | quietset wraps similar ideas into a composable pipeline primitive with JSONL I/O, per-sample reports, confidence adjustment, and configurable thresholds. |
+| **LLM evaluation frameworks (RAGAS, DeepEval)** | Frameworks that score LLM outputs against reference answers using model-based judges. | quietset is judge-agnostic. It takes whatever scores or labels your judges produce and measures agreement across runs, budgets, models, or seeds. |
 
 ## License
 
