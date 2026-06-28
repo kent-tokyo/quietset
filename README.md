@@ -129,9 +129,14 @@ println!("{:?}", reports[0].decision);
 
 ## Compared to adjacent tools
 
-- **Cleanlab** — Python, task-specific, detects label errors via trained classifiers. quietset is model-agnostic and needs no training.
-- **Label Studio** — annotation UI. quietset is a CLI/library primitive.
-- **pandas** — general data tool. quietset specializes in stability metrics.
+| Tool | What it does | How quietset differs |
+|------|-------------|----------------------|
+| **Cleanlab** | Python library that detects label errors using trained classifiers and confident learning. Works with classification, regression, and NLP tasks. | quietset needs no model training and makes no task-specific assumptions. It filters by cross-run stability rather than by estimated label quality. |
+| **Label Studio** | Web-based annotation platform for labelling images, text, audio, and time series. Supports multi-annotator workflows. | quietset is a CLI/library primitive, not an annotation UI. It consumes labels already produced by other tools and measures how stable they are. |
+| **pandas / polars** | General-purpose data manipulation libraries. Can compute std, groupby, and aggregations. | quietset provides a purpose-built stability schema — `keep / review / drop` decisions, per-dimension sub-scores, instability diagnostics — that would otherwise require substantial custom code. |
+| **Great Expectations / Soda** | Data quality frameworks that validate data against rules (nulls, ranges, schema). | Those tools check whether data *conforms to a schema*. quietset checks whether labels or scores are *consistent across repeated evaluations*. The concerns are orthogonal. |
+| **scipy.stats / sklearn metrics** | Statistical functions such as Cohen's kappa, Fleiss' kappa, and inter-rater agreement. | quietset wraps similar ideas into a composable pipeline primitive with JSONL I/O, per-sample reports, and configurable thresholds. You could replicate it with scipy, but you would need to wire up grouping, normalisation, weighting, and output formatting yourself. |
+| **LLM evaluation frameworks (RAGAS, DeepEval)** | Frameworks that score LLM outputs against reference answers using model-based judges. | quietset is judge-agnostic. It takes *whatever scores or labels your judges produce* and measures agreement across runs, budgets, models, or seeds. It composes with any LLM judge rather than replacing one. |
 
 ## License
 
