@@ -754,3 +754,76 @@ fn test_gold_label_changes_reliability() {
         "e1 reliability should be lower when gold_label differs: {e1_no_gold:.2} vs {e1_gold:.2}"
     );
 }
+
+#[test]
+fn test_lcb_keep_demotions_excludes_already_unstable() {
+    // The key semantic: lcb_keep_demotions counts samples where
+    //   stability_score >= keep_threshold  (raw would keep)
+    //   AND label_agreement_lcb < keep_threshold  (LCB would not keep)
+    //
+    // Critically, a sample already below keep_threshold in raw mode (e.g. split labels)
+    // must NOT be counted even if its LCB is also below the threshold.
+    //
+    // Note: Wilson LCB at 95% confidence requires ~22+ observations of all-match to exceed 0.85,
+    // so small samples (even fully-agreeing ones) still have LCB < 0.85 and are valid demotions.
+    let config = ScoreConfig {
+        thresholds: Thresholds {
+            keep: 0.85,
+            drop: 0.40,
+        },
+        confidence_level: 0.95,
+        ..ScoreConfig::default()
+    };
+
+    let make_obs = |id: &str, label: &str| Observation {
+        sample_id: id.into(),
+        label: Some(label.into()),
+        ..Default::default()
+    };
+
+    let mut obs = Vec::new();
+    // sample_a, sample_b: fully-agreeing → stability_score = 1.0, LCB < 0.85 → demotion candidates
+    for _ in 0..5 {
+        obs.push(make_obs("a", "win"));
+    }
+    for _ in 0..2 {
+        obs.push(make_obs("b", "win"));
+    }
+    // sample_c: 50/50 split → stability_score < 0.85 → already unstable, must NOT be counted
+    obs.push(make_obs("c", "win"));
+    obs.push(make_obs("c", "loss"));
+
+    let reports = score_all(obs, &config);
+    let keep_threshold = config.thresholds.keep;
+
+    let is_demotion = |r: &&quietset::StabilityReport| {
+        r.stability_score >= keep_threshold
+            && r.label_agreement_lcb
+                .map(|v| v < keep_threshold)
+                .unwrap_or(false)
+    };
+
+    // sample_c must not appear in demotions — it's already review in raw mode
+    let report_c = reports.iter().find(|r| r.sample_id == "c").unwrap();
+    assert!(
+        report_c.stability_score < keep_threshold,
+        "sample_c stability_score should be below keep threshold: {:.4}",
+        report_c.stability_score
+    );
+    assert!(
+        !is_demotion(&report_c),
+        "sample_c must not be counted as a demotion (already unstable)"
+    );
+
+    // sample_a and sample_b should be demotions (raw-keep but LCB < threshold)
+    let report_a = reports.iter().find(|r| r.sample_id == "a").unwrap();
+    let report_b = reports.iter().find(|r| r.sample_id == "b").unwrap();
+    assert!(
+        is_demotion(&report_a),
+        "sample_a should be a demotion candidate"
+    );
+    assert!(
+        is_demotion(&report_b),
+        "sample_b should be a demotion candidate"
+    );
+}

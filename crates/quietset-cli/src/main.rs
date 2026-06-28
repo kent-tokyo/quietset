@@ -412,6 +412,9 @@ fn run_score(args: ScoreArgs) -> Result<()> {
     if observations.is_empty() {
         anyhow::bail!("no observations found");
     }
+    if args.decision_score.is_some() && (args.use_adjusted_score || args.use_lcb_score) {
+        eprintln!("warning: --decision-score overrides --use-adjusted-score / --use-lcb-score");
+    }
     let config = ScoreConfig {
         score_scale: args.score_scale,
         thresholds: Thresholds {
@@ -434,6 +437,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             budgets: args.min_budgets_keep,
             models: args.min_models_keep,
         },
+        // --decision-score wins; --use-* are backwards-compat aliases (fallback only)
         decision_score: match args.decision_score {
             Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
             Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
@@ -561,9 +565,10 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
     let lcb_keep_demotions = reports
         .iter()
         .filter(|r| {
-            r.label_agreement_lcb
-                .map(|v| v < args.keep_threshold)
-                .unwrap_or(false)
+            r.stability_score >= args.keep_threshold
+                && r.label_agreement_lcb
+                    .map(|v| v < args.keep_threshold)
+                    .unwrap_or(false)
         })
         .count();
     let has_lcb = reports.iter().any(|r| r.label_agreement_lcb.is_some());
@@ -628,8 +633,8 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
     println!("  drop:         {:>8}  ({:.1}%)", n_drop, pct(n_drop));
     if has_lcb {
         println!(
-            "  lcb_keep_demotions:{:>8}  (label_agreement_lcb < {:.2})",
-            lcb_keep_demotions, args.keep_threshold
+            "  lcb_keep_demotions:{:>8}  (stability_score >= {:.2}, label_agreement_lcb < {:.2})",
+            lcb_keep_demotions, args.keep_threshold, args.keep_threshold
         );
     }
     println!();

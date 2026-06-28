@@ -303,7 +303,7 @@ samples:              1000
   keep:                621  (62.1%)
   review:              291  (29.1%)
   drop:                 88   (8.8%)
-  lcb_keep_demotions:  139  (label_agreement_lcb < 0.85)
+  lcb_keep_demotions:  139  (stability_score >= 0.85, label_agreement_lcb < 0.85)
 
 stability_score:
   mean:              0.7412
@@ -321,9 +321,10 @@ top instability drivers (review + drop samples):
   budget sensitivity        17%
 ```
 
-`lcb_keep_demotions` は `label_agreement_lcb < keep_threshold` なサンプル数です —
-`--decision-score lcb` が keep に到達させないサンプル数を示します。生の安定性スコアで
-スコアリングした場合でも、LCB の影響をプレビューできます。
+`lcb_keep_demotions` は `stability_score >= keep_threshold`（raw では keep）かつ
+`label_agreement_lcb < keep_threshold`（LCB では keep 未満）なサンプル数です。
+`--decision-score lcb` に切り替えたときに keep から降格されるサンプルの数を示します。
+raw スコアで既に review/drop なサンプルは除外されます。
 
 `--json` フラグで CI/jq から使いやすい JSON を出力できます。
 

@@ -310,7 +310,7 @@ samples:              1000
   keep:                621  (62.1%)
   review:              291  (29.1%)
   drop:                 88   (8.8%)
-  lcb_keep_demotions:  139  (label_agreement_lcb < 0.85)
+  lcb_keep_demotions:  139  (stability_score >= 0.85, label_agreement_lcb < 0.85)
 
 stability_score:
   mean:              0.7412
@@ -328,10 +328,11 @@ top instability drivers (review + drop samples):
   budget sensitivity        17%
 ```
 
-`lcb_keep_demotions` counts samples where `label_agreement_lcb < keep_threshold` — the number
-of samples that `--decision-score lcb` would prevent from reaching `keep`, regardless of what
-the raw stability score says. Useful as a preview of LCB's effect even when scoring was done
-in raw mode. Pass `--keep-threshold` to match the value used during scoring.
+`lcb_keep_demotions` counts samples where `stability_score >= keep_threshold` (raw mode would
+keep them) but `label_agreement_lcb < keep_threshold` (LCB mode would not) — the number of
+samples that switching to `--decision-score lcb` would demote from `keep`. Samples already
+below the threshold in raw mode are excluded. Pass `--keep-threshold` to match the value used
+during scoring.
 
 Use `--json` for CI integration:
 
