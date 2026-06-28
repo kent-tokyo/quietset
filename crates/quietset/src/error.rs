@@ -4,10 +4,14 @@ use thiserror::Error;
 pub enum Error {
     #[error("missing required field: {0}")]
     MissingField(&'static str),
-    #[error("invalid score value at line {line}")]
+    #[error("invalid score value at line {line}: must be finite")]
     InvalidScore { line: usize },
+    #[error("invalid budget value at line {line}: must be finite")]
+    InvalidBudget { line: usize },
     #[error("score_scale must be positive and finite, got {0}")]
     InvalidScoreScale(f64),
+    #[error("invalid threshold: {0}")]
+    InvalidThreshold(String),
     #[error("unsupported format: {0}")]
     UnsupportedFormat(String),
     #[error("could not parse JSONL at line {line}: {source}")]

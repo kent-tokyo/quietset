@@ -42,6 +42,12 @@ pub fn parse_jsonl(input: &str) -> crate::error::Result<Vec<Observation>> {
         if obs.sample_id.trim().is_empty() {
             return Err(crate::error::Error::MissingField("sample_id"));
         }
+        if obs.score.is_some_and(|s| !s.is_finite()) {
+            return Err(crate::error::Error::InvalidScore { line: i + 1 });
+        }
+        if obs.budget.is_some_and(|b| !b.is_finite()) {
+            return Err(crate::error::Error::InvalidBudget { line: i + 1 });
+        }
         out.push(obs);
     }
     Ok(out)
@@ -51,10 +57,16 @@ pub fn parse_jsonl(input: &str) -> crate::error::Result<Vec<Observation>> {
 pub fn parse_csv(input: &[u8]) -> crate::error::Result<Vec<Observation>> {
     let mut rdr = csv::Reader::from_reader(input);
     let mut out = Vec::new();
-    for record in rdr.deserialize::<Observation>() {
+    for (i, record) in rdr.deserialize::<Observation>().enumerate() {
         let obs = record?;
         if obs.sample_id.trim().is_empty() {
             return Err(crate::error::Error::MissingField("sample_id"));
+        }
+        if obs.score.is_some_and(|s| !s.is_finite()) {
+            return Err(crate::error::Error::InvalidScore { line: i + 1 });
+        }
+        if obs.budget.is_some_and(|b| !b.is_finite()) {
+            return Err(crate::error::Error::InvalidBudget { line: i + 1 });
         }
         out.push(obs);
     }

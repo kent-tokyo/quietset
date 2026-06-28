@@ -22,6 +22,50 @@ impl std::fmt::Display for Decision {
     }
 }
 
+/// Per-dimension sub-scores that contributed to `stability_score`.
+///
+/// Each value is in `[0.0, 1.0]` where `1.0` is fully stable.
+/// Fields are omitted when the dimension was not computable (e.g. no labels, no budgets).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StabilityComponents {
+    /// Label agreement across observations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<f64>,
+    /// Score consistency (`1 - normalized_score_std`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_consistency: Option<f64>,
+    /// Budget robustness (`1 - budget_sensitivity`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_robustness: Option<f64>,
+    /// Seed robustness (`1 - seed_sensitivity`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_robustness: Option<f64>,
+    /// Label agreement across models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_agreement: Option<f64>,
+    /// Label agreement across evaluators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluator_agreement: Option<f64>,
+}
+
+impl StabilityComponents {
+    /// Returns the name and value of the weakest (lowest) component, if any exist.
+    pub fn weakest(&self) -> Option<(&'static str, f64)> {
+        let candidates = [
+            ("label", self.label),
+            ("score_consistency", self.score_consistency),
+            ("budget_robustness", self.budget_robustness),
+            ("seed_robustness", self.seed_robustness),
+            ("model_agreement", self.model_agreement),
+            ("evaluator_agreement", self.evaluator_agreement),
+        ];
+        candidates
+            .into_iter()
+            .filter_map(|(name, val)| val.map(|v| (name, v)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    }
+}
+
 /// Stability report for one sample, aggregated across all its observations.
 ///
 /// All `Option` fields are omitted from JSON output when absent so that
@@ -65,4 +109,6 @@ pub struct StabilityReport {
     pub stability_score: f64,
     /// Filtering decision derived from `stability_score` and the configured thresholds.
     pub decision: Decision,
+    /// Per-dimension sub-scores that contributed to `stability_score`.
+    pub components: StabilityComponents,
 }

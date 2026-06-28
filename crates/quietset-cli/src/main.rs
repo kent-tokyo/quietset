@@ -4,9 +4,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+use std::cmp::Reverse;
+use std::collections::HashMap;
+
 use quietset::{
-    parse_csv, parse_jsonl, score_all, Decision, ScoreConfig, ScoreWeights, StabilityReport,
-    Thresholds,
+    Decision, ScoreConfig, ScoreWeights, StabilityReport, Thresholds, parse_csv, parse_jsonl,
+    score_all,
 };
 
 #[derive(Parser)]
@@ -22,6 +25,8 @@ enum Commands {
     Score(ScoreArgs),
     /// Filter scored JSONL by stability/decision thresholds
     Filter(FilterArgs),
+    /// Print aggregate statistics for a scored JSONL file
+    Summary(SummaryArgs),
 }
 
 #[derive(clap::Args)]
@@ -81,6 +86,17 @@ struct ScoreArgs {
     /// Weight for evaluator_agreement in stability_score.
     #[arg(long, default_value_t = 1.0)]
     weight_evaluators: f64,
+}
+
+#[derive(clap::Args)]
+struct SummaryArgs {
+    /// Input scored JSONL file. Use '-' for stdin.
+    #[arg(default_value = "-")]
+    input: String,
+
+    /// Skip malformed lines instead of exiting with an error.
+    #[arg(long)]
+    skip_invalid: bool,
 }
 
 #[derive(clap::Args)]
@@ -201,6 +217,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Score(args) => run_score(args),
         Commands::Filter(args) => run_filter(args),
+        Commands::Summary(args) => run_summary(args),
     }
 }
 
@@ -281,15 +298,17 @@ fn run_filter(args: FilterArgs) -> Result<()> {
                 return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
             }
         };
-        if let Some(min) = args.min_stability {
-            if report.stability_score < min {
-                continue;
-            }
+        if args
+            .min_stability
+            .is_some_and(|min| report.stability_score < min)
+        {
+            continue;
         }
-        if let Some(max) = args.max_disagreement {
-            if report.disagreement_score > max {
-                continue;
-            }
+        if args
+            .max_disagreement
+            .is_some_and(|max| report.disagreement_score > max)
+        {
+            continue;
         }
         if let Some(ref d) = args.decision {
             let want = match d {
@@ -304,4 +323,104 @@ fn run_filter(args: FilterArgs) -> Result<()> {
         writeln!(out, "{line}")?;
     }
     Ok(())
+}
+
+fn run_summary(args: SummaryArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let mut reports: Vec<StabilityReport> = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(r) => reports.push(r),
+            Err(e) => {
+                if args.skip_invalid {
+                    eprintln!("warning: skipping line {}: {e}", i + 1);
+                } else {
+                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
+                }
+            }
+        }
+    }
+    if reports.is_empty() {
+        anyhow::bail!("no records found");
+    }
+
+    let total = reports.len();
+    let n_keep = reports
+        .iter()
+        .filter(|r| r.decision == Decision::Keep)
+        .count();
+    let n_review = reports
+        .iter()
+        .filter(|r| r.decision == Decision::Review)
+        .count();
+    let n_drop = reports
+        .iter()
+        .filter(|r| r.decision == Decision::Drop)
+        .count();
+
+    let mut scores: Vec<f64> = reports.iter().map(|r| r.stability_score).collect();
+    scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+    let median = percentile(&scores, 0.50);
+    let p10 = percentile(&scores, 0.10);
+    let p90 = percentile(&scores, 0.90);
+
+    // Instability drivers: count the weakest component for each review+drop sample
+    let mut driver_counts: HashMap<&'static str, usize> = HashMap::new();
+    let unstable: Vec<&StabilityReport> = reports
+        .iter()
+        .filter(|r| r.decision != Decision::Keep)
+        .collect();
+    for r in &unstable {
+        if let Some((name, _)) = r.components.weakest() {
+            *driver_counts.entry(name).or_insert(0) += 1;
+        }
+    }
+    let mut drivers: Vec<(&str, usize)> = driver_counts.into_iter().collect();
+    drivers.sort_by_key(|d| Reverse(d.1));
+
+    let pct = |n: usize| n as f64 / total as f64 * 100.0;
+    println!("samples:        {:>8}", total);
+    println!("  keep:         {:>8}  ({:.1}%)", n_keep, pct(n_keep));
+    println!("  review:       {:>8}  ({:.1}%)", n_review, pct(n_review));
+    println!("  drop:         {:>8}  ({:.1}%)", n_drop, pct(n_drop));
+    println!();
+    println!("stability_score:");
+    println!("  mean:         {:>8.4}", mean);
+    println!("  median:       {:>8.4}", median);
+    println!("  p10 / p90:    {:.4} / {:.4}", p10, p90);
+
+    if !drivers.is_empty() && !unstable.is_empty() {
+        println!();
+        println!("top instability drivers (review + drop samples):");
+        for (name, count) in drivers.iter().take(6) {
+            let pct_driver = *count as f64 / unstable.len() as f64 * 100.0;
+            println!("  {:<24} {:.0}%", driver_label(name), pct_driver);
+        }
+    }
+    Ok(())
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = (p * (sorted.len() - 1) as f64).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+fn driver_label(name: &str) -> &str {
+    match name {
+        "label" => "label disagreement",
+        "score_consistency" => "score variance",
+        "budget_robustness" => "budget sensitivity",
+        "seed_robustness" => "seed sensitivity",
+        "model_agreement" => "model disagreement",
+        "evaluator_agreement" => "evaluator disagreement",
+        other => other,
+    }
 }

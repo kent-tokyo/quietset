@@ -2,26 +2,33 @@
 
 ## Unreleased
 
+### Added
+
+- `StabilityComponents` struct — per-dimension sub-scores (`label`, `score_consistency`, `budget_robustness`, `seed_robustness`, `model_agreement`, `evaluator_agreement`) now appear in every `StabilityReport` under the `components` key
+- `StabilityComponents::weakest()` — returns the lowest-scoring component for instability diagnosis
+- `quietset summary` CLI command — prints aggregate stats (sample counts, stability percentiles, top instability drivers) for a scored JSONL file
+- `cargo audit` (via `rustsec/audit-check`) added to GitHub Actions CI
+- `Error::InvalidBudget` — returned when `budget` is NaN or infinite
+- `Error::InvalidThreshold` — returned when thresholds are out of `[0.0, 1.0]` or `drop > keep`
+
 ### Fixed
+
+- `score` and `budget` fields with NaN or infinite values now return an explicit error instead of propagating silently
+- `ScoreConfig::validate()` now also checks that `keep_threshold` and `drop_threshold` are in `[0.0, 1.0]` and that `drop_threshold <= keep_threshold`
+
+### Changed
 
 - `seed_sensitivity` is now included in `stability_score` computation (was computed but silently excluded)
 - `sample_id` missing or empty now returns `Error::MissingField("sample_id")` instead of silently using `""`
 - `majority_label` tie-breaking is now deterministic: alphabetically first label wins on equal counts
-- Same tiebreak fix applied inside `model_agreement` and `evaluator_agreement` per-group majority selection
-
-### Added
-
 - `ScoreConfig::validate()` — returns `Error::InvalidScoreScale` if `score_scale` is not positive and finite
-- `ScoreWeights` struct for per-dimension weighting of `stability_score`; set a weight to `0.0` to exclude a dimension
+- `ScoreWeights` struct for per-dimension weighting of `stability_score`
 - `--weight-labels/scores/budget/seed/models/evaluators` flags on `quietset score` CLI
-- `debug_assert` guard in `compute_report` to catch bad `score_scale` during development
 
-- Initial workspace with `quietset` library and `quietset-cli` crates
-- `Observation` struct with JSONL and CSV parsing
-- `StabilityReport` with label_agreement, score_mean/std/range, budget_sensitivity, seed_sensitivity, model_agreement, evaluator_agreement
-- `stability_score` and `disagreement_score` computation
-- `keep/review/drop` decision logic with configurable thresholds
-- `quietset score` CLI command
-- `quietset filter` CLI command with `--min-stability`, `--max-disagreement`, `--decision`
-- Integration tests with golden fixture files
-- GitHub Actions CI
+## 0.1.0
+
+- Initial release
+- `quietset` library crate with `Observation`, `StabilityReport`, `Decision`, `ScoreConfig`, `ScoreWeights`
+- `quietset-cli` crate with `score`, `filter`, `summary` commands
+- JSONL and CSV input; JSONL and CSV output
+- GitHub Actions CI (`fmt`, `clippy`, `test`, `doc`, `audit`)

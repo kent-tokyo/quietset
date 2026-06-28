@@ -1,4 +1,4 @@
-use crate::metrics::{compute_report, ScoreConfig};
+use crate::metrics::{ScoreConfig, compute_report};
 use crate::observation::Observation;
 use crate::schema::StabilityReport;
 

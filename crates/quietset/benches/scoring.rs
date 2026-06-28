@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use quietset::{parse_jsonl, score_all, ScoreConfig};
+use criterion::{Criterion, criterion_group, criterion_main};
+use quietset::{ScoreConfig, parse_jsonl, score_all};
 
 fn bench_score_simple(c: &mut Criterion) {
     let input = std::fs::read_to_string("../../tests/fixtures/simple.jsonl").unwrap();

@@ -1,6 +1,6 @@
-use crate::decision::{decide, Thresholds};
+use crate::decision::{Thresholds, decide};
 use crate::observation::Observation;
-use crate::schema::StabilityReport;
+use crate::schema::{StabilityComponents, StabilityReport};
 use ordered_float::OrderedFloat;
 use std::collections::HashMap;
 
@@ -59,10 +59,29 @@ impl Default for ScoreConfig {
 }
 
 impl ScoreConfig {
-    /// Validate this config, returning an error if `score_scale` is not positive and finite.
+    /// Validate this config, returning an error for invalid values.
     pub fn validate(&self) -> crate::error::Result<()> {
         if !self.score_scale.is_finite() || self.score_scale <= 0.0 {
             return Err(crate::error::Error::InvalidScoreScale(self.score_scale));
+        }
+        let t = &self.thresholds;
+        if !t.keep.is_finite() || t.keep < 0.0 || t.keep > 1.0 {
+            return Err(crate::error::Error::InvalidThreshold(format!(
+                "keep_threshold ({}) must be in [0.0, 1.0]",
+                t.keep
+            )));
+        }
+        if !t.drop.is_finite() || t.drop < 0.0 || t.drop > 1.0 {
+            return Err(crate::error::Error::InvalidThreshold(format!(
+                "drop_threshold ({}) must be in [0.0, 1.0]",
+                t.drop
+            )));
+        }
+        if t.drop > t.keep {
+            return Err(crate::error::Error::InvalidThreshold(format!(
+                "drop_threshold ({}) must be <= keep_threshold ({})",
+                t.drop, t.keep
+            )));
         }
         Ok(())
     }
@@ -163,15 +182,20 @@ pub fn compute_report(
             wtotal += w.evaluator_agreement;
         }
 
-        if wtotal > 0.0 {
-            wsum / wtotal
-        } else {
-            0.5
-        }
+        if wtotal > 0.0 { wsum / wtotal } else { 0.5 }
     };
 
     let disagreement_score = 1.0 - stability_score;
     let decision = decide(stability_score, &config.thresholds);
+
+    let components = StabilityComponents {
+        label: label_agreement,
+        score_consistency: score_std.map(|s| 1.0 - (s / config.score_scale).min(1.0)),
+        budget_robustness: budget_sensitivity.map(|b| 1.0 - b),
+        seed_robustness: seed_sensitivity.map(|s| 1.0 - s),
+        model_agreement,
+        evaluator_agreement,
+    };
 
     StabilityReport {
         sample_id: sample_id.to_string(),
@@ -188,6 +212,7 @@ pub fn compute_report(
         disagreement_score,
         stability_score,
         decision,
+        components,
     }
 }
 

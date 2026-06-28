@@ -31,6 +31,15 @@ quietset filter scored.jsonl --decision keep > keep.jsonl
 
 # Pipeline from stdin
 cat runs/*.jsonl | quietset score - > scored.jsonl
+
+# Aggregate statistics
+quietset summary scored.jsonl
+
+# CSV output
+quietset score input.jsonl --output-format csv > scored.csv
+
+# Weight label agreement 2x, ignore score variance
+quietset score input.jsonl --weight-labels 2.0 --weight-scores 0.0 > scored.jsonl
 ```
 
 ## Input JSONL format
@@ -56,16 +65,44 @@ The `stability_score` is a value in `[0.0, 1.0]`:
 - `1.0` = highly stable
 - `0.0` = highly unstable
 
-It is computed as the mean of available sub-scores:
+It is the **weighted mean** of available sub-scores (all in `[0.0, 1.0]`):
 
-- `label_agreement` — fraction of observations with the majority label
-- `1 - normalized_score_std` — score consistency
-- `1 - budget_sensitivity` — robustness to compute budget changes
-- `model_agreement` — label agreement across models
-- `evaluator_agreement` — label agreement across evaluators
+| Component | Value |
+|-----------|-------|
+| `label_agreement` | fraction of observations with the majority label |
+| `score_consistency` | `1 - normalized_score_std` |
+| `budget_robustness` | `1 - budget_sensitivity` |
+| `seed_robustness` | `1 - seed_sensitivity` |
+| `model_agreement` | label agreement across models |
+| `evaluator_agreement` | label agreement across evaluators |
 
 Missing dimensions (e.g. no labels, no budgets) are excluded from the mean.
 Single observations receive `stability_score = 0.5` (review by default).
+
+Each sub-score is also exposed in `StabilityReport.components` so you can see why a sample was scored as it was:
+
+```json
+{
+  "sample_id": "a",
+  "stability_score": 0.91,
+  "decision": "keep",
+  "components": {
+    "label": 1.0,
+    "score_consistency": 0.96,
+    "budget_robustness": 0.88
+  }
+}
+```
+
+Use `--weight-*` flags to emphasise dimensions relevant to your pipeline:
+
+```bash
+# LLM judge: weight evaluator/model agreement more
+quietset score input.jsonl --weight-labels 1.0 --weight-evaluators 2.0 --weight-models 2.0
+
+# Simulation: weight seed/budget robustness more
+quietset score input.jsonl --weight-seed 2.0 --weight-budget 2.0
+```
 
 ## Decisions
 
