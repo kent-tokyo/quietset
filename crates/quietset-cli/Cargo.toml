@@ -1,7 +1,7 @@
 [package]
 name = "quietset-cli"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "CLI for quietset — filter datasets by label stability"
 repository = "https://github.com/kent-tokyo/quietset"
