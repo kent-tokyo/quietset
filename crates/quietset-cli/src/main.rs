@@ -144,6 +144,11 @@ struct ScoreArgs {
     #[arg(long)]
     estimate_evaluator_reliability: bool,
 
+    /// Append a trailing dataset stats line (fleiss_kappa, krippendorff_alpha) to the scored
+    /// output so that `audit --json` can include them without a separate --observations flag.
+    #[arg(long)]
+    embed_stats: bool,
+
     /// Weight for label_agreement in stability_score (0 = exclude).
     #[arg(long)]
     weight_labels: Option<f64>,
@@ -557,7 +562,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
                 let mut obs = Vec::new();
                 for (i, line) in raw.lines().enumerate() {
                     let line = line.trim();
-                    if line.is_empty() {
+                    if line.is_empty() || line.contains("\"_quietset_stats\"") {
                         continue;
                     }
                     match serde_json::from_str::<Observation>(line) {
@@ -674,6 +679,17 @@ fn run_score(args: ScoreArgs) -> Result<()> {
                 let line = serde_json::to_string(report).context("serializing report")?;
                 writeln!(out, "{line}")?;
             }
+            if args.embed_stats {
+                let mut meta = serde_json::Map::new();
+                meta.insert("_quietset_stats".into(), serde_json::json!(true));
+                if let Some(k) = compute_fleiss_kappa(&observations) {
+                    meta.insert("fleiss_kappa".into(), serde_json::json!(k));
+                }
+                if let Some(a) = compute_krippendorff_alpha(&observations) {
+                    meta.insert("krippendorff_alpha".into(), serde_json::json!(a));
+                }
+                writeln!(out, "{}", serde_json::to_string(&meta)?)?;
+            }
         }
         Format::Csv => write_csv_reports(&reports, out)?,
     }
@@ -685,7 +701,7 @@ fn run_filter(args: FilterArgs) -> Result<()> {
     let mut out = open_output(args.output.as_ref())?;
     for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.contains("\"_quietset_stats\"") {
             continue;
         }
         let report: StabilityReport = match serde_json::from_str(line) {
@@ -750,7 +766,7 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
     let mut reports: Vec<StabilityReport> = Vec::new();
     for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.contains("\"_quietset_stats\"") {
             continue;
         }
         match serde_json::from_str(line) {
@@ -968,7 +984,7 @@ fn run_compare(args: CompareArgs) -> Result<()> {
         let mut map = HashMap::new();
         for (i, line) in raw.lines().enumerate() {
             let line = line.trim();
-            if line.is_empty() {
+            if line.is_empty() || line.contains("\"_quietset_stats\"") {
                 continue;
             }
             let r: StabilityReport =
@@ -1179,9 +1195,18 @@ fn run_audit(args: AuditArgs) -> Result<()> {
 
     let raw = read_input(&args.input)?;
     let mut reports: Vec<StabilityReport> = Vec::new();
+    let mut embedded_kappa: Option<f64> = None;
+    let mut embedded_alpha: Option<f64> = None;
     for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
+            continue;
+        }
+        if line.contains("\"_quietset_stats\"") {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                embedded_kappa = v["fleiss_kappa"].as_f64().or(embedded_kappa);
+                embedded_alpha = v["krippendorff_alpha"].as_f64().or(embedded_alpha);
+            }
             continue;
         }
         match serde_json::from_str(line) {
@@ -1339,13 +1364,17 @@ fn run_audit(args: AuditArgs) -> Result<()> {
         if let Some(v) = iqr_mean {
             out["score_iqr_mean"] = serde_json::json!(v);
         }
-        if let Some(ref obs) = agreement_obs {
-            if let Some(k) = compute_fleiss_kappa(obs) {
-                out["fleiss_kappa"] = serde_json::json!(k);
-            }
-            if let Some(a) = compute_krippendorff_alpha(obs) {
-                out["krippendorff_alpha"] = serde_json::json!(a);
-            }
+        // --observations flag takes priority; fall back to embedded stats from --embed-stats
+        let (kappa, alpha) = if let Some(ref obs) = agreement_obs {
+            (compute_fleiss_kappa(obs), compute_krippendorff_alpha(obs))
+        } else {
+            (embedded_kappa, embedded_alpha)
+        };
+        if let Some(k) = kappa {
+            out["fleiss_kappa"] = serde_json::json!(k);
+        }
+        if let Some(a) = alpha {
+            out["krippendorff_alpha"] = serde_json::json!(a);
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -1463,18 +1492,19 @@ fn run_audit(args: AuditArgs) -> Result<()> {
             );
         }
     }
-    if let Some(ref obs) = agreement_obs {
-        let kappa = compute_fleiss_kappa(obs);
-        let alpha = compute_krippendorff_alpha(obs);
-        if kappa.is_some() || alpha.is_some() {
-            println!();
-            println!("dataset agreement:");
-            if let Some(k) = kappa {
-                println!("  fleiss_kappa:         {:.4}", k);
-            }
-            if let Some(a) = alpha {
-                println!("  krippendorff_alpha:   {:.4}", a);
-            }
+    let (text_kappa, text_alpha) = if let Some(ref obs) = agreement_obs {
+        (compute_fleiss_kappa(obs), compute_krippendorff_alpha(obs))
+    } else {
+        (embedded_kappa, embedded_alpha)
+    };
+    if text_kappa.is_some() || text_alpha.is_some() {
+        println!();
+        println!("dataset agreement:");
+        if let Some(k) = text_kappa {
+            println!("  fleiss_kappa:         {:.4}", k);
+        }
+        if let Some(a) = text_alpha {
+            println!("  krippendorff_alpha:   {:.4}", a);
         }
     }
     Ok(())
@@ -1485,7 +1515,7 @@ fn run_select(args: SelectArgs) -> Result<()> {
     let mut lines_and_reports: Vec<(String, StabilityReport)> = Vec::new();
     for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.contains("\"_quietset_stats\"") {
             continue;
         }
         match serde_json::from_str::<StabilityReport>(line) {
@@ -1593,7 +1623,7 @@ fn run_recommend(args: RecommendArgs) -> Result<()> {
     let mut reports: Vec<StabilityReport> = Vec::new();
     for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.contains("\"_quietset_stats\"") {
             continue;
         }
         match serde_json::from_str(line) {
@@ -1716,7 +1746,7 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
         let mut obs = Vec::new();
         for (i, line) in raw.lines().enumerate() {
             let line = line.trim();
-            if line.is_empty() {
+            if line.is_empty() || line.contains("\"_quietset_stats\"") {
                 continue;
             }
             match serde_json::from_str::<Observation>(line) {
@@ -1815,7 +1845,7 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
         let mut obs = Vec::new();
         for (i, line) in raw.lines().enumerate() {
             let line = line.trim();
-            if line.is_empty() {
+            if line.is_empty() || line.contains("\"_quietset_stats\"") {
                 continue;
             }
             match serde_json::from_str::<Observation>(line) {
@@ -1876,7 +1906,7 @@ fn run_reliability(args: ReliabilityArgs) -> Result<()> {
         let mut obs = Vec::new();
         for (i, line) in raw.lines().enumerate() {
             let line = line.trim();
-            if line.is_empty() {
+            if line.is_empty() || line.contains("\"_quietset_stats\"") {
                 continue;
             }
             match serde_json::from_str::<Observation>(line) {
