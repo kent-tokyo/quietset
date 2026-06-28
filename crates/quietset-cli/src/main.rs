@@ -36,6 +36,10 @@ enum Commands {
     Reliability(ReliabilityArgs),
     /// Deep diagnostic report for a scored JSONL file
     Audit(AuditArgs),
+    /// Suggest which samples to re-evaluate and why
+    Recommend(RecommendArgs),
+    /// Compute the fraction of kept samples that are stably wrong (requires gold_label)
+    StableWrongRisk(StableWrongRiskArgs),
     /// Find a keep_threshold matching a precision or coverage target using gold labels
     Calibrate(CalibrateArgs),
 }
@@ -220,6 +224,18 @@ struct CompareArgs {
     /// Show per-component mean deltas.
     #[arg(long)]
     components: bool,
+
+    /// Compare after-file decisions against a hypothetical decision-score policy.
+    #[arg(long, value_enum)]
+    policy_after: Option<DecisionScoreArg>,
+
+    /// Keep threshold for policy comparison (default 0.85).
+    #[arg(long, default_value_t = 0.85)]
+    policy_keep_threshold: f64,
+
+    /// Drop threshold for policy comparison (default 0.40).
+    #[arg(long, default_value_t = 0.40)]
+    policy_drop_threshold: f64,
 }
 
 #[derive(clap::Args)]
@@ -288,6 +304,38 @@ struct AuditArgs {
     skip_invalid: bool,
     #[arg(long, default_value_t = 0.85)]
     keep_threshold: f64,
+}
+
+#[derive(clap::Args)]
+struct RecommendArgs {
+    /// Input scored JSONL file. Use '-' for stdin.
+    #[arg(default_value = "-")]
+    input: String,
+    /// Skip malformed lines.
+    #[arg(long)]
+    skip_invalid: bool,
+    /// Keep threshold (default 0.85).
+    #[arg(long, default_value_t = 0.85)]
+    keep_threshold: f64,
+    /// Only emit recommendations for review or drop samples (skip keep with no LCB risk).
+    #[arg(long)]
+    unstable_only: bool,
+}
+
+#[derive(clap::Args)]
+struct StableWrongRiskArgs {
+    /// Input observation JSONL (must have gold_label). Use '-' for stdin.
+    #[arg(default_value = "-")]
+    input: String,
+    /// Skip malformed lines.
+    #[arg(long)]
+    skip_invalid: bool,
+    /// Keep threshold for scoring (default 0.85).
+    #[arg(long, default_value_t = 0.85)]
+    keep_threshold: f64,
+    /// Number of stable-wrong samples to list (default 10).
+    #[arg(long, default_value_t = 10)]
+    top: usize,
 }
 
 #[derive(clap::Args)]
@@ -451,6 +499,8 @@ fn main() -> Result<()> {
         Commands::Compare(args) => run_compare(args),
         Commands::Reliability(args) => run_reliability(args),
         Commands::Audit(args) => run_audit(args),
+        Commands::Recommend(args) => run_recommend(args),
+        Commands::StableWrongRisk(args) => run_stable_wrong_risk(args),
         Commands::Calibrate(args) => run_calibrate(args),
     }
 }
@@ -1023,6 +1073,54 @@ fn run_compare(args: CompareArgs) -> Result<()> {
             println!("  {:<26} {:.4} → {:.4}  ({:+.4}){}", name, b, a, d, marker);
         }
     }
+    if let Some(ref pol) = args.policy_after {
+        let kt = args.policy_keep_threshold;
+        let dt = args.policy_drop_threshold;
+        let policy_decide = |r: &StabilityReport| -> Decision {
+            let score = match pol {
+                DecisionScoreArg::Adjusted => r.adjusted_stability_score,
+                DecisionScoreArg::Lcb => r.label_agreement_lcb.unwrap_or(0.0),
+                DecisionScoreArg::Raw => r.stability_score,
+            };
+            if score >= kt {
+                Decision::Keep
+            } else if score <= dt {
+                Decision::Drop
+            } else {
+                Decision::Review
+            }
+        };
+        let pol_name = match pol {
+            DecisionScoreArg::Raw => "raw",
+            DecisionScoreArg::Adjusted => "adjusted",
+            DecisionScoreArg::Lcb => "lcb",
+        };
+        let mut pol_matrix = [[0usize; 3]; 3];
+        for (_, a) in &pairs {
+            pol_matrix[decision_idx(&a.decision)][decision_idx(&policy_decide(a))] += 1;
+        }
+        let demoted = pol_matrix[0][1] + pol_matrix[0][2];
+        let promoted = pol_matrix[1][0] + pol_matrix[2][0];
+        println!();
+        println!(
+            "policy comparison: current → {} (keep_threshold={:.2}):",
+            pol_name, kt
+        );
+        println!(
+            "  {:>10}  {:>8}  {:>8}  {:>8}",
+            "", "→keep", "→review", "→drop"
+        );
+        for (i, from) in labels.iter().enumerate() {
+            println!(
+                "  {:>10}  {:>8}  {:>8}  {:>8}",
+                format!("{from}↓"),
+                pol_matrix[i][0],
+                pol_matrix[i][1],
+                pol_matrix[i][2]
+            );
+        }
+        println!("  demoted by policy: {}  promoted: {}", demoted, promoted);
+    }
     Ok(())
 }
 
@@ -1301,6 +1399,191 @@ fn run_audit(args: AuditArgs) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn run_recommend(args: RecommendArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let mut reports: Vec<StabilityReport> = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(r) => reports.push(r),
+            Err(e) => {
+                if args.skip_invalid {
+                    eprintln!("warning: skipping line {}: {e}", i + 1);
+                } else {
+                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
+                }
+            }
+        }
+    }
+    if reports.is_empty() {
+        anyhow::bail!("no records found");
+    }
+
+    for r in &reports {
+        if args.unstable_only && r.decision == Decision::Keep {
+            // still emit if LCB risk is present
+            let lcb_risk = r
+                .label_agreement_lcb
+                .is_some_and(|v| v < args.keep_threshold);
+            if !lcb_risk {
+                continue;
+            }
+        }
+
+        // Priority-ordered rules — emit the first matching one
+        let rec: Option<serde_json::Value> = if r.stability_score >= args.keep_threshold
+            && r.label_agreement_lcb
+                .is_some_and(|v| v < args.keep_threshold)
+        {
+            Some(serde_json::json!({
+                "sample_id": r.sample_id,
+                "reason": "high_raw_low_lcb",
+                "recommended_action": "add_observations",
+                "stability_score": r.stability_score,
+                "label_agreement_lcb": r.label_agreement_lcb,
+                "n_observations": r.n_observations,
+            }))
+        } else if r.evaluator_agreement.is_some_and(|v| v < 0.7) {
+            Some(serde_json::json!({
+                "sample_id": r.sample_id,
+                "reason": "low_evaluator_agreement",
+                "recommended_action": "add_evaluators",
+                "evaluator_agreement": r.evaluator_agreement,
+            }))
+        } else if r.seed_sensitivity.is_some_and(|v| v > 0.3) {
+            Some(serde_json::json!({
+                "sample_id": r.sample_id,
+                "reason": "high_seed_sensitivity",
+                "recommended_action": "add_seeds",
+                "seed_sensitivity": r.seed_sensitivity,
+            }))
+        } else if r.budget_sensitivity.is_some_and(|v| v > 0.3) {
+            Some(serde_json::json!({
+                "sample_id": r.sample_id,
+                "reason": "high_budget_sensitivity",
+                "recommended_action": "increase_budget",
+                "budget_sensitivity": r.budget_sensitivity,
+            }))
+        } else if r.model_agreement.is_some_and(|v| v < 0.7) {
+            Some(serde_json::json!({
+                "sample_id": r.sample_id,
+                "reason": "low_model_agreement",
+                "recommended_action": "add_models",
+                "model_agreement": r.model_agreement,
+            }))
+        } else {
+            None
+        };
+
+        if let Some(line) = rec {
+            println!("{}", serde_json::to_string(&line)?);
+        }
+    }
+    Ok(())
+}
+
+fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let observations = if args.skip_invalid {
+        let mut obs = Vec::new();
+        for (i, line) in raw.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Observation>(line) {
+                Ok(o) => match o.validate(i + 1) {
+                    Ok(()) => obs.push(o),
+                    Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+                },
+                Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+            }
+        }
+        obs
+    } else {
+        parse_jsonl(&raw).context("parsing JSONL")?
+    };
+    if observations.is_empty() {
+        anyhow::bail!("no observations found");
+    }
+
+    let gold_map: std::collections::HashMap<String, String> = observations
+        .iter()
+        .filter_map(|o| {
+            o.gold_label
+                .as_deref()
+                .map(|g| (o.sample_id.clone(), g.to_string()))
+        })
+        .collect();
+    if gold_map.is_empty() {
+        anyhow::bail!("no gold_label found; stable_wrong_risk requires gold_label on observations");
+    }
+
+    let config = ScoreConfig {
+        thresholds: Thresholds {
+            keep: args.keep_threshold,
+            drop: 0.40,
+        },
+        ..ScoreConfig::default()
+    };
+    let reports = score_all(observations, &config);
+
+    let n_total = reports.len();
+    let n_keep = reports
+        .iter()
+        .filter(|r| r.decision == Decision::Keep)
+        .count();
+
+    let mut stable_wrong: Vec<serde_json::Value> = reports
+        .iter()
+        .filter(|r| r.decision == Decision::Keep)
+        .filter(|r| {
+            r.majority_label
+                .as_deref()
+                .and_then(|m| gold_map.get(&r.sample_id).map(|g| m != g.as_str()))
+                .unwrap_or(false)
+        })
+        .map(|r| {
+            serde_json::json!({
+                "sample_id": r.sample_id,
+                "stability_score": r.stability_score,
+                "majority_label": r.majority_label,
+                "gold_label": gold_map.get(&r.sample_id),
+            })
+        })
+        .collect();
+
+    stable_wrong.sort_by(|a, b| {
+        b["stability_score"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&a["stability_score"].as_f64().unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let n_stable_wrong = stable_wrong.len();
+    let rate = if n_keep > 0 {
+        n_stable_wrong as f64 / n_keep as f64
+    } else {
+        0.0
+    };
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "n_total": n_total,
+            "n_keep": n_keep,
+            "n_stable_wrong": n_stable_wrong,
+            "stable_wrong_rate_among_keep": rate,
+            "samples": stable_wrong.iter().take(args.top).collect::<Vec<_>>(),
+        }))?
+    );
     Ok(())
 }
 
