@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-06-28
+
+### Added
+- `audit` command — deep diagnostic report for scored JSONL; surfaces borderline, high_raw_low_lcb, high_score_mad, budget_sensitive, seed_sensitive samples; `--json` and `--top N`
+- `calibrate` command — grid-search `keep_threshold` (0.99→0.50, step 0.01) to meet `--target-precision` or `--target-coverage` using `gold_label` observations; outputs recommended threshold and achieved metrics
+- `CalibrationResult` struct and `compute_calibration()` function exported from `quietset` crate
+- `filter`: `--min-label-lcb`, `--min-confidence`, `--max-score-mad`, `--max-score-iqr` flags
+- `compare --components`: per-dimension mean deltas with regression markers; `component_deltas` in JSON output
+- `score --profile llm-judge|simulation|game-ai|benchmark`: use-case weight presets; explicit `--weight-*` and `--decision-score` flags override preset
+- `reliability`: confusion matrix per evaluator (`predicted → gold → count`) when `gold_label` present in observations
+
+### Changed
+- `score` `--weight-*` flags changed from `f64` (default 1.0) to `Option<f64>` (no default) to allow profile presets to supply defaults without clobbering explicit user values
+
 ## 0.4.0 — 2026-06-28
 
 ### Added

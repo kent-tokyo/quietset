@@ -65,8 +65,27 @@ quietset score input.jsonl --use-lcb-score --confidence-level 0.99 > scored.json
 quietset score input.jsonl --decision-score lcb > scored.jsonl
 quietset score input.jsonl --decision-score adjusted > scored.jsonl
 
+# プロファイルプリセット（weight と decision-score のデフォルトを設定）
+quietset score input.jsonl --profile llm-judge > scored.jsonl
+quietset score input.jsonl --profile simulation > scored.jsonl
+
 # 最低3件の観測・2人の評価者がなければ keep にしない
 quietset score input.jsonl --min-observations-keep 3 --min-evaluators-keep 2 > scored.jsonl
+
+# LCB・confidence・スコア分散でフィルタ
+quietset filter scored.jsonl --min-label-lcb 0.70 > filtered.jsonl
+quietset filter scored.jsonl --min-confidence 0.60 --max-score-mad 0.05 > filtered.jsonl
+
+# コンポーネント差分つきで比較（劣化箇所を特定）
+quietset compare before.jsonl after.jsonl --components
+
+# 深掘り診断レポート
+quietset audit scored.jsonl
+quietset audit scored.jsonl --json | jq '.high_raw_low_lcb'
+
+# gold_label から keep 閾値を自動探索
+quietset calibrate input.jsonl --target-precision 0.95
+quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 ```
 
 ## 入力 JSONL フォーマット
@@ -165,12 +184,23 @@ quietset score input.jsonl --min-observations-keep 3 --min-evaluators-keep 2 > s
 
 ### 用途別に重みを調整する
 
-```bash
-# LLM judge: 評価者・モデル間の合意を重視
-quietset score input.jsonl --weight-evaluators 2.0 --weight-models 2.0
+`--weight-*` フラグで個別調整するか、`--profile` でプリセットを使えます。
 
-# ゲーム探索・シミュレーション: シード・budget への頑健性を重視
-quietset score input.jsonl --weight-seed 2.0 --weight-budget 2.0
+| プロファイル | 重み変更 | デフォルト decision-score |
+|------------|--------|------------------------|
+| `llm-judge` | evaluator ×2、model ×2 | `lcb` |
+| `simulation` | budget ×2、seed ×2 | `adjusted` |
+| `game-ai` | budget ×2、seed ×1.5、最低観測数 3 | `adjusted` |
+| `benchmark` | label ×2、evaluator ×1.5 | `raw` |
+
+明示的な `--weight-*` / `--decision-score` はプリセットより優先されます。
+
+```bash
+# LLM judge プリセット
+quietset score input.jsonl --profile llm-judge > scored.jsonl
+
+# プリセットから一部を上書き
+quietset score input.jsonl --profile simulation --weight-budget 3.0 > scored.jsonl
 ```
 
 ## confidence と adjusted_stability_score
@@ -292,6 +322,21 @@ top 5 regressions:
 
 `--json` フラグでマシン可読な JSON を出力できます。モデル更新・プロンプト変更・評価器変更の前後比較に使えます。
 
+`--components` フラグでコンポーネント別の平均差分を表示できます。
+
+```bash
+quietset compare before.jsonl after.jsonl --components
+```
+
+```
+component deltas (mean before → after):
+  label                      0.88 → 0.90  (+0.02)
+  score_consistency          0.79 → 0.86  (+0.07)
+  budget_robustness          0.91 → 0.72  (-0.19)  ← regression
+```
+
+`--json` 出力には `component_deltas` オブジェクト（符号付きデルタ値）が追加されます。
+
 ## summary コマンド
 
 ```bash
@@ -359,6 +404,82 @@ quietset reliability input.jsonl
 
 サンプルあたり2件以上の評価が2サンプル以上ない場合は出力されません（定義不能）。
 `jq 'select(.fleiss_kappa)'` でサマリ行だけ取り出せます。
+
+`gold_label` がある場合、各評価者の行に `confusion` 混同行列も含まれます（`predicted → gold → count`）。
+
+```json
+{"evaluator_id": "m1", "reliability": 0.94, "confusion": {"win": {"win": 120, "loss": 8}, "loss": {"win": 11, "loss": 101}}}
+{"fleiss_kappa": 0.81, "krippendorff_alpha": 0.83}
+```
+
+## filter コマンド（拡張）
+
+`--min-stability`、`--max-disagreement`、`--decision` に加え、診断フィールドでの絞り込みができます。
+
+| フラグ | 条件 |
+|-------|------|
+| `--min-label-lcb <f>` | `label_agreement_lcb >= f` |
+| `--min-confidence <f>` | `confidence >= f` |
+| `--max-score-mad <f>` | `score_mad <= f` |
+| `--max-score-iqr <f>` | `score_iqr <= f` |
+
+```bash
+quietset filter scored.jsonl --min-label-lcb 0.70 --min-confidence 0.60 --max-score-mad 0.05 > clean.jsonl
+```
+
+## audit コマンド
+
+scored JSONL の深掘り診断レポートを出力します。
+
+```bash
+quietset audit scored.jsonl
+quietset audit scored.jsonl --json           # JSON 出力
+quietset audit scored.jsonl --top 20         # リストを最大 20 件表示（デフォルト 10）
+```
+
+```
+=== quietset audit ===
+total:              1000
+  keep:              621  (62.1%)
+  review:            291  (29.1%)
+  drop:               88   (8.8%)
+  lcb_keep_demotions:  139  (stability >= 0.85, lcb < 0.85)
+
+--- borderline (0.75 <= stability <= 0.95, top 10) ---
+  sample_042  0.8201  review
+
+--- high_raw_low_lcb (stability >= 0.85, lcb < 0.85, top 10) ---
+  sample_003  stability=0.9100  lcb=0.3423
+
+--- budget_sensitive (top 10) ---
+  sample_091  budget_sensitivity=0.8200
+```
+
+`--json` 出力には `borderline`、`high_raw_low_lcb`、`high_score_mad`、`budget_sensitive`、`seed_sensitive` が配列で含まれます。
+
+## calibrate コマンド
+
+`gold_label` を持つ観測 JSONL から、精度目標を満たす `keep_threshold` を自動探索します。
+
+```bash
+quietset calibrate input.jsonl --target-precision 0.95
+quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
+```
+
+```json
+{
+  "decision_score": "lcb",
+  "keep_threshold": 0.91,
+  "drop_threshold": 0.40,
+  "achieved_precision": 0.982,
+  "coverage": 0.61,
+  "n_keep": 610,
+  "n_total": 1000
+}
+```
+
+`keep_threshold` を 0.99 から 0.50 まで 0.01 刻みで探索し、精度目標を満たす最も緩い閾値を返します。
+`gold_label` がない場合や目標を達成できない場合はエラーになります（`--target-precision` を下げてください）。
 
 ## Rust API
 

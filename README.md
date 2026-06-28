@@ -63,15 +63,31 @@ quietset score input.jsonl --use-adjusted-score > scored.jsonl
 # Penalise low-evidence samples: Wilson LCB on label agreement (most conservative)
 quietset score input.jsonl --use-lcb-score > scored.jsonl
 
-# Tune the confidence level for LCB (default 0.95)
-quietset score input.jsonl --use-lcb-score --confidence-level 0.99 > scored.jsonl
-
 # Explicit --decision-score flag (preferred for scripting; --use-* are aliases)
 quietset score input.jsonl --decision-score lcb > scored.jsonl
 quietset score input.jsonl --decision-score adjusted > scored.jsonl
 
+# Apply a use-case preset (sets weight and decision-score defaults)
+quietset score input.jsonl --profile llm-judge > scored.jsonl
+quietset score input.jsonl --profile simulation > scored.jsonl
+
 # Require at least 3 observations and 2 evaluators before Keep
 quietset score input.jsonl --min-observations-keep 3 --min-evaluators-keep 2 > scored.jsonl
+
+# Filter by LCB, confidence, and dispersion
+quietset filter scored.jsonl --min-label-lcb 0.70 > filtered.jsonl
+quietset filter scored.jsonl --min-confidence 0.60 --max-score-mad 0.05 > filtered.jsonl
+
+# Compare with per-component deltas (spot regressions)
+quietset compare before.jsonl after.jsonl --components
+
+# Deep diagnostic audit report
+quietset audit scored.jsonl
+quietset audit scored.jsonl --json | jq '.high_raw_low_lcb'
+
+# Calibrate keep_threshold from gold labels to meet a precision target
+quietset calibrate input.jsonl --target-precision 0.95
+quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 ```
 
 ## Input JSONL format
@@ -168,14 +184,24 @@ Each sub-score is also exposed in `components` so you can see why a sample was s
 }
 ```
 
-Use `--weight-*` flags to emphasise dimensions relevant to your pipeline:
+Use `--weight-*` flags to emphasise dimensions relevant to your pipeline, or use `--profile` to
+apply a preset:
+
+| Profile | Weight changes | Default decision-score |
+|---------|---------------|----------------------|
+| `llm-judge` | evaluator ×2, model ×2 | `lcb` |
+| `simulation` | budget ×2, seed ×2 | `adjusted` |
+| `game-ai` | budget ×2, seed ×1.5; min-observations 3 | `adjusted` |
+| `benchmark` | label ×2, evaluator ×1.5 | `raw` |
+
+Explicit `--weight-*` and `--decision-score` flags always override the preset.
 
 ```bash
-# LLM judge: weight evaluator/model agreement more
-quietset score input.jsonl --weight-evaluators 2.0 --weight-models 2.0
+# LLM judge preset (equivalent to --weight-evaluators 2 --weight-models 2 --decision-score lcb)
+quietset score input.jsonl --profile llm-judge > scored.jsonl
 
-# Simulation: weight seed/budget robustness more
-quietset score input.jsonl --weight-seed 2.0 --weight-budget 2.0
+# Override one weight from the preset
+quietset score input.jsonl --profile simulation --weight-budget 3.0 > scored.jsonl
 ```
 
 ## Confidence and adjusted score
@@ -299,6 +325,28 @@ top 5 regressions:
 
 Add `--json` for machine-readable output.
 
+Add `--components` to show per-dimension mean deltas:
+
+```bash
+quietset compare before.jsonl after.jsonl --components
+```
+
+```
+matched samples:  10000
+mean stability:   0.7412 → 0.7801
+
+decision transitions (before → after):
+...
+
+component deltas (mean before → after):
+  label                      0.88 → 0.90  (+0.02)
+  score_consistency          0.79 → 0.86  (+0.07)
+  budget_robustness          0.91 → 0.72  (-0.19)  ← regression
+  seed_robustness            0.88 → 0.89  (+0.01)
+```
+
+`--json` adds a `component_deltas` object with signed delta values.
+
 ## summary command
 
 ```bash
@@ -340,6 +388,26 @@ Use `--json` for CI integration:
 quietset summary scored.jsonl --json | jq '.drop_rate < 0.1'
 ```
 
+## filter command
+
+In addition to `--min-stability`, `--max-disagreement`, and `--decision`, `filter` supports
+diagnostic field filters:
+
+| Flag | Keeps records where |
+|------|---------------------|
+| `--min-label-lcb <f>` | `label_agreement_lcb >= f` (drop low-evidence keeps) |
+| `--min-confidence <f>` | `confidence >= f` (drop low-observation-count samples) |
+| `--max-score-mad <f>` | `score_mad <= f` (drop high-dispersion samples) |
+| `--max-score-iqr <f>` | `score_iqr <= f` (drop high-spread samples) |
+
+```bash
+# Keep only samples with high evidence and low score dispersion
+quietset filter scored.jsonl --min-label-lcb 0.70 --min-confidence 0.60 --max-score-mad 0.05 > clean.jsonl
+```
+
+Records that lack the filtered field (e.g. `label_agreement_lcb` is absent when no labels were
+provided) are excluded by `--min-*` filters and included by `--max-*` filters.
+
 ## reliability command (experimental)
 
 Estimate per-evaluator reliability from observation JSONL:
@@ -369,6 +437,86 @@ The trailing line reports two dataset-level agreement statistics:
 
 Both are omitted when fewer than 2 subjects have at least 2 ratings each (undefined).
 Use `jq 'select(.fleiss_kappa)'` to extract the summary line.
+
+When `gold_label` is present, each evaluator line also includes a `confusion` matrix
+(`predicted → gold → count`):
+
+```json
+{"evaluator_id": "m1", "reliability": 0.94, "confusion": {"win": {"win": 120, "loss": 8}, "loss": {"win": 11, "loss": 101}}}
+{"evaluator_id": "m2", "reliability": 0.71, "confusion": {"win": {"win": 98, "loss": 31}, "loss": {"win": 4, "loss": 107}}}
+{"fleiss_kappa": 0.81, "krippendorff_alpha": 0.83}
+```
+
+## audit command
+
+Deep diagnostic report for a scored JSONL file:
+
+```bash
+quietset audit scored.jsonl
+quietset audit scored.jsonl --json           # machine-readable
+quietset audit scored.jsonl --top 20         # show top 20 in each list (default 10)
+```
+
+```
+=== quietset audit ===
+total:              1000
+  keep:              621  (62.1%)
+  review:            291  (29.1%)
+  drop:               88   (8.8%)
+  lcb_keep_demotions:  139  (stability >= 0.85, lcb < 0.85)
+
+stability_score:
+  mean:            0.7412
+  median:          0.7810
+  p10 / p90:       0.4200 / 0.9600
+
+top instability drivers:
+  label disagreement        38%
+  score variance            24%
+
+--- borderline (0.75 <= stability <= 0.95, top 10) ---
+  sample_042  0.8201  review
+  sample_187  0.8490  keep
+
+--- high_raw_low_lcb (stability >= 0.85, lcb < 0.85, top 10) ---
+  sample_003  stability=0.9100  lcb=0.3423
+
+--- budget_sensitive (top 10) ---
+  sample_091  budget_sensitivity=0.8200
+```
+
+`--json` output includes `borderline`, `high_raw_low_lcb`, `high_score_mad`, `budget_sensitive`,
+and `seed_sensitive` as arrays of `{sample_id, ...}` objects, suitable for piping to downstream tools.
+
+## calibrate command
+
+Find a `keep_threshold` that meets a precision or coverage target, using `gold_label` observations:
+
+```bash
+quietset calibrate input.jsonl --target-precision 0.95
+quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
+quietset calibrate input.jsonl --target-precision 0.90 --target-coverage 0.50
+```
+
+```json
+{
+  "decision_score": "lcb",
+  "keep_threshold": 0.91,
+  "drop_threshold": 0.40,
+  "achieved_precision": 0.982,
+  "coverage": 0.61,
+  "n_keep": 610,
+  "n_total": 1000
+}
+```
+
+`calibrate` grid-searches `keep_threshold` from 0.99 down to 0.50 (step 0.01) and returns the
+loosest threshold that meets the target. Requires `gold_label` on at least one observation per
+sample. Returns an error if no threshold meets the target (try a lower `--target-precision`).
+
+> **Note:** calibrate cannot separate stable-correct from stable-wrong samples — if a sample
+> consistently gets the wrong label, its `stability_score` is indistinguishable from a correct
+> sample. Use `gold_label`-based `reliability` diagnostics to identify systematically wrong evaluators.
 
 ## Rust API
 
