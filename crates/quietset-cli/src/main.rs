@@ -360,6 +360,9 @@ struct RecommendArgs {
     /// Only emit recommendations for review or drop samples (skip keep with no LCB risk).
     #[arg(long)]
     unstable_only: bool,
+    /// Human-readable text output instead of JSONL.
+    #[arg(long)]
+    text: bool,
 }
 
 #[derive(clap::Args)]
@@ -1664,8 +1667,44 @@ fn run_recommend(args: RecommendArgs) -> Result<()> {
             None
         };
 
-        if let Some(line) = rec {
-            println!("{}", serde_json::to_string(&line)?);
+        if let Some(rec) = rec {
+            if args.text {
+                let reason = rec["reason"].as_str().unwrap_or("");
+                let action = rec["recommended_action"].as_str().unwrap_or("");
+                let detail = match reason {
+                    "high_raw_low_lcb" => format!(
+                        "lcb={:.3}  n={}",
+                        rec["label_agreement_lcb"].as_f64().unwrap_or(0.0),
+                        rec["n_observations"].as_u64().unwrap_or(0)
+                    ),
+                    "low_evaluator_agreement" => format!(
+                        "evaluator_agreement={:.3}",
+                        rec["evaluator_agreement"].as_f64().unwrap_or(0.0)
+                    ),
+                    "high_seed_sensitivity" => format!(
+                        "seed_sensitivity={:.3}",
+                        rec["seed_sensitivity"].as_f64().unwrap_or(0.0)
+                    ),
+                    "high_budget_sensitivity" => format!(
+                        "budget_sensitivity={:.3}",
+                        rec["budget_sensitivity"].as_f64().unwrap_or(0.0)
+                    ),
+                    "low_model_agreement" => format!(
+                        "model_agreement={:.3}",
+                        rec["model_agreement"].as_f64().unwrap_or(0.0)
+                    ),
+                    _ => String::new(),
+                };
+                println!(
+                    "{:<36} {:>20}  →  {}  ({})",
+                    rec["sample_id"].as_str().unwrap_or(""),
+                    reason,
+                    action,
+                    detail
+                );
+            } else {
+                println!("{}", serde_json::to_string(&rec)?);
+            }
         }
     }
     Ok(())
