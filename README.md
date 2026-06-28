@@ -352,12 +352,23 @@ quietset reliability input.jsonl
 {"evaluator_id": "m1", "reliability": 0.94}
 {"evaluator_id": "m2", "reliability": 0.71}
 {"evaluator_id": "m3", "reliability": 0.52}
+{"fleiss_kappa": 0.81, "krippendorff_alpha": 0.83}
 ```
 
 Reliability is the fraction of evaluations where the evaluator's label matches the reference label.
 By default, the reference is the majority label across evaluators. If `gold_label` is set on any
 observation for a sample, it is used as the reference instead — enabling ground-truth-based
 reliability without changing the scoring output.
+
+The trailing line reports two dataset-level agreement statistics:
+
+| Field | Meaning |
+|-------|---------|
+| `fleiss_kappa` | Inter-rater agreement corrected for chance (nominal labels, variable raters per subject). 0 = chance, 1 = perfect, negative = worse than chance. |
+| `krippendorff_alpha` | Agreement coefficient using the coincidence-matrix formulation for nominal labels. More general than kappa; same scale. |
+
+Both are omitted when fewer than 2 subjects have at least 2 ratings each (undefined).
+Use `jq 'select(.fleiss_kappa)'` to extract the summary line.
 
 ## Rust API
 

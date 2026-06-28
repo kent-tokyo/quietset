@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-06-28
+
+### Added
+- `compute_fleiss_kappa()` — inter-rater agreement corrected for chance; nominal labels, variable raters per subject; exported from `quietset` crate
+- `compute_krippendorff_alpha()` — coincidence-matrix formulation for nominal labels, variable raters; exported from `quietset` crate
+- `reliability` command now appends a trailing JSONL line `{"fleiss_kappa": ..., "krippendorff_alpha": ...}` after per-evaluator lines; omitted when fewer than 2 subjects have ≥ 2 ratings
+
 ### Added
 - `label_agreement_lcb` on `StabilityReport` — Wilson confidence interval lower bound of `label_agreement`; guards against over-confidence on low-n samples
 - `score_mad`, `score_iqr` on `StabilityReport` — median absolute deviation and interquartile range; more robust to outliers than `score_std`
