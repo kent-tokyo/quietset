@@ -10,6 +10,8 @@ pub enum Error {
     InvalidBudget { line: usize },
     #[error("score_scale must be positive and finite, got {0}")]
     InvalidScoreScale(f64),
+    #[error("confidence_k must be finite and >= 0.0, got {0}")]
+    InvalidConfidenceK(f64),
     #[error("invalid threshold: {0}")]
     InvalidThreshold(String),
     #[error("invalid weight for '{name}': must be finite and >= 0.0, got {value}")]

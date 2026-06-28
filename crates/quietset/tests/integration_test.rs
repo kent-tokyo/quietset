@@ -1,5 +1,6 @@
 use quietset::{
-    Decision, Observation, ScoreConfig, ScoreWeights, Thresholds, parse_jsonl, score_all,
+    Decision, MinRequirements, Observation, ScoreConfig, ScoreWeights, Thresholds, parse_jsonl,
+    score_all,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -434,4 +435,137 @@ fn test_weakest_component_tie_is_deterministic() {
         assert_eq!(name, "label");
         assert_eq!(val, 0.5);
     }
+}
+
+#[test]
+fn test_confidence_single_obs() {
+    let obs = vec![quietset::Observation {
+        sample_id: "a".into(),
+        score: Some(0.9),
+        ..Default::default()
+    }];
+    let reports = score_all(obs, &ScoreConfig::default());
+    // n=1, k=3: confidence = 1/(1+3) = 0.25
+    let expected_confidence = 1.0 / (1.0 + 3.0);
+    assert!((reports[0].confidence - expected_confidence).abs() < 1e-9);
+}
+
+#[test]
+fn test_adjusted_score_pulls_toward_half() {
+    // n=2, high stability -> adjusted should be lower than raw
+    let jsonl = r#"{"sample_id":"a","label":"win","score":0.95}
+{"sample_id":"a","label":"win","score":0.94}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    let r = &reports[0];
+    assert!(
+        r.adjusted_stability_score < r.stability_score,
+        "adjusted={} should be < raw={}",
+        r.adjusted_stability_score,
+        r.stability_score
+    );
+}
+
+#[test]
+fn test_min_observations_demotes_keep() {
+    let jsonl = r#"{"sample_id":"a","label":"win","score":0.99}
+{"sample_id":"a","label":"win","score":0.98}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    // Without min requirement: likely keep
+    let reports_default = score_all(obs.clone(), &ScoreConfig::default());
+    assert_eq!(reports_default[0].decision, Decision::Keep);
+    // With min 5 observations: demoted to review
+    let config = ScoreConfig {
+        min_requirements: MinRequirements {
+            observations: 5,
+            ..Default::default()
+        },
+        ..ScoreConfig::default()
+    };
+    let reports_min = score_all(obs, &config);
+    assert_eq!(
+        reports_min[0].decision,
+        Decision::Review,
+        "should be demoted to review when n < min_observations"
+    );
+}
+
+#[test]
+fn test_label_margin_unanimous() {
+    let jsonl = r#"{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"win"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    assert!(
+        (reports[0].label_margin.unwrap() - 1.0).abs() < 1e-9,
+        "unanimous -> margin = 1.0"
+    );
+}
+
+#[test]
+fn test_label_margin_split() {
+    // 2 win, 2 loss -> margin = 0
+    let jsonl = r#"{"sample_id":"x","label":"win"}
+{"sample_id":"x","label":"loss"}
+{"sample_id":"x","label":"win"}
+{"sample_id":"x","label":"loss"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    assert!(
+        (reports[0].label_margin.unwrap() - 0.0).abs() < 1e-9,
+        "50/50 -> margin = 0.0"
+    );
+}
+
+#[test]
+fn test_label_entropy_uniform() {
+    // 3 equal labels -> normalized entropy = 1.0
+    let jsonl = r#"{"sample_id":"a","label":"A"}
+{"sample_id":"a","label":"B"}
+{"sample_id":"a","label":"C"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    let e = reports[0].label_entropy.unwrap();
+    assert!(
+        (e - 1.0).abs() < 1e-6,
+        "uniform 3-class -> entropy = 1.0, got {e}"
+    );
+}
+
+#[test]
+fn test_budget_slope_positive() {
+    // higher budget -> higher score: slope should be positive
+    let jsonl = r#"{"sample_id":"a","score":0.5,"budget":4}
+{"sample_id":"a","score":0.7,"budget":8}
+{"sample_id":"a","score":0.9,"budget":16}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    let slope = reports[0].budget_slope.unwrap();
+    assert!(
+        slope > 0.0,
+        "increasing scores with budget -> positive slope, got {slope}"
+    );
+}
+
+#[test]
+fn test_evaluator_reliability() {
+    use quietset::compute_evaluator_reliability;
+    // e1 always agrees with majority, e2 disagrees sometimes
+    // sample a: 1 win (e1), 1 win (e2) -> majority = win
+    // sample b: 2 win (e1), 1 loss (e2) -> majority = win (unambiguous)
+    let jsonl = r#"{"sample_id":"a","label":"win","evaluator_id":"e1"}
+{"sample_id":"a","label":"win","evaluator_id":"e2"}
+{"sample_id":"b","label":"win","evaluator_id":"e1"}
+{"sample_id":"b","label":"win","evaluator_id":"e1"}
+{"sample_id":"b","label":"loss","evaluator_id":"e2"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs.clone(), &ScoreConfig::default());
+    let rel = compute_evaluator_reliability(&obs, &reports);
+    assert_eq!(
+        *rel.get("e1").unwrap() as i32,
+        1,
+        "e1 always matches majority"
+    );
+    assert!(rel.get("e2").unwrap() < &1.0, "e2 disagrees sometimes");
 }

@@ -86,6 +86,12 @@ pub struct StabilityReport {
     /// Fraction of observations that carry the majority label (`[0.0, 1.0]`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_agreement: Option<f64>,
+    /// (majority_count - runner_up_count) / total_labels. 1.0 if only one label type. None if no labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_margin: Option<f64>,
+    /// Normalized Shannon entropy of label distribution [0, 1]. 0.0 = unanimous, 1.0 = uniform. None if no labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_entropy: Option<f64>,
     /// Mean of all numeric scores.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_mean: Option<f64>,
@@ -98,6 +104,9 @@ pub struct StabilityReport {
     /// Normalized range of per-budget mean scores; `None` if fewer than two budget levels. (`[0.0, 1.0]`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_sensitivity: Option<f64>,
+    /// Slope of (budget, mean_score) trend. None if < 2 budget levels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_slope: Option<f64>,
     /// Normalized range of per-seed mean scores; `None` if fewer than two seeds. (`[0.0, 1.0]`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed_sensitivity: Option<f64>,
@@ -107,6 +116,10 @@ pub struct StabilityReport {
     /// Fraction of evaluators whose majority label matches the overall majority; `None` if fewer than two evaluators. (`[0.0, 1.0]`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evaluator_agreement: Option<f64>,
+    /// Reliability confidence based on observation count: n / (n + confidence_k). In [0, 1].
+    pub confidence: f64,
+    /// stability_score adjusted for confidence: stability_score * confidence + 0.5 * (1 - confidence)
+    pub adjusted_stability_score: f64,
     /// `1.0 - stability_score`.
     pub disagreement_score: f64,
     /// Overall stability score in `[0.0, 1.0]`. Higher is more stable.
