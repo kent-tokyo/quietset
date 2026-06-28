@@ -8,8 +8,8 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use quietset::{
-    Decision, MinRequirements, Observation, ScoreConfig, ScoreWeights, StabilityReport, Thresholds,
-    compute_evaluator_reliability, parse_csv, parse_jsonl, score_all,
+    Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights,
+    StabilityReport, Thresholds, compute_evaluator_reliability, parse_csv, parse_jsonl, score_all,
 };
 
 #[derive(Parser)]
@@ -402,16 +402,14 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             budgets: args.min_budgets_keep,
             models: args.min_models_keep,
         },
+        decision_score: if args.use_adjusted_score {
+            DecisionScore::Adjusted
+        } else {
+            DecisionScore::Raw
+        },
     };
     config.validate().context("invalid configuration")?;
-    let mut reports = score_all(observations.clone(), &config);
-
-    // Optionally override decision with adjusted_stability_score
-    if args.use_adjusted_score {
-        for r in &mut reports {
-            r.decision = quietset::decision::decide(r.adjusted_stability_score, &config.thresholds);
-        }
-    }
+    let reports = score_all(observations.clone(), &config);
 
     if args.estimate_evaluator_reliability {
         let reliability = compute_evaluator_reliability(&observations, &reports);

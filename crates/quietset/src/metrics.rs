@@ -4,6 +4,16 @@ use crate::schema::{StabilityComponents, StabilityReport};
 use ordered_float::OrderedFloat;
 use std::collections::HashMap;
 
+/// Which score value drives the keep / review / drop decision.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum DecisionScore {
+    /// Use raw `stability_score` (default).
+    #[default]
+    Raw,
+    /// Use `adjusted_stability_score` (confidence-penalised). MinRequirements still applies afterwards.
+    Adjusted,
+}
+
 /// Minimum observation counts required for a Keep decision. Samples not meeting these are demoted to Review.
 #[derive(Debug, Clone)]
 pub struct MinRequirements {
@@ -77,6 +87,8 @@ pub struct ScoreConfig {
     pub confidence_k: f64,
     /// Minimum requirements for a Keep decision.
     pub min_requirements: MinRequirements,
+    /// Which score value drives the keep/review/drop threshold comparison.
+    pub decision_score: DecisionScore,
 }
 
 impl Default for ScoreConfig {
@@ -87,6 +99,7 @@ impl Default for ScoreConfig {
             weights: ScoreWeights::default(),
             confidence_k: 3.0,
             min_requirements: MinRequirements::default(),
+            decision_score: DecisionScore::Raw,
         }
     }
 }
@@ -265,7 +278,13 @@ pub fn compute_report(
     let confidence = n as f64 / (n as f64 + config.confidence_k);
     let adjusted_stability_score = stability_score * confidence + 0.5 * (1.0 - confidence);
     let disagreement_score = 1.0 - stability_score;
-    let mut decision = decide(stability_score, &config.thresholds);
+
+    // Choose which score drives the decision; MinRequirements is applied afterwards and cannot be overridden.
+    let base_score = match config.decision_score {
+        DecisionScore::Raw => stability_score,
+        DecisionScore::Adjusted => adjusted_stability_score,
+    };
+    let mut decision = decide(base_score, &config.thresholds);
 
     // If decided to Keep, check minimum requirements
     if decision == crate::schema::Decision::Keep {

@@ -24,8 +24,8 @@ pub mod stream;
 pub use decision::Thresholds;
 pub use error::{Error, Result};
 pub use metrics::{
-    MinRequirements, ScoreConfig, ScoreWeights, compute_evaluator_reliability, compute_report,
-    score_all,
+    DecisionScore, MinRequirements, ScoreConfig, ScoreWeights, compute_evaluator_reliability,
+    compute_report, score_all,
 };
 pub use observation::{Observation, parse_csv, parse_jsonl};
 pub use schema::{Decision, StabilityComponents, StabilityReport};

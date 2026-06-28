@@ -1,6 +1,6 @@
 use quietset::{
-    Decision, MinRequirements, Observation, ScoreConfig, ScoreWeights, Thresholds, parse_jsonl,
-    score_all,
+    Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights, Thresholds,
+    parse_jsonl, score_all,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -568,4 +568,57 @@ fn test_evaluator_reliability() {
         "e1 always matches majority"
     );
     assert!(rel.get("e2").unwrap() < &1.0, "e2 disagrees sometimes");
+}
+
+#[test]
+fn test_min_requirements_not_overridden_by_adjusted_score() {
+    // n=2, high stability — adjusted score (with low confidence_k) stays above keep threshold
+    // but n < min_requirements.observations=3, so decision must be Review, not Keep
+    let jsonl = r#"{"sample_id":"a","label":"win","score":0.99}
+{"sample_id":"a","label":"win","score":0.98}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let config = ScoreConfig {
+        decision_score: DecisionScore::Adjusted,
+        confidence_k: 0.01, // near-zero k -> confidence ≈ 1 -> adjusted ≈ raw (high score)
+        min_requirements: MinRequirements {
+            observations: 3,
+            ..Default::default()
+        },
+        ..ScoreConfig::default()
+    };
+    let reports = score_all(obs, &config);
+    // adjusted score is high enough for Keep, but n=2 < 3 -> must stay Review
+    assert_eq!(
+        reports[0].decision,
+        Decision::Review,
+        "MinRequirements must take precedence; adjusted_score={:.4}",
+        reports[0].adjusted_stability_score
+    );
+}
+
+#[test]
+fn test_adjusted_score_pulls_toward_half_with_large_k() {
+    let jsonl = r#"{"sample_id":"a","label":"win","score":0.99}
+{"sample_id":"a","label":"win","score":0.98}"#;
+    let obs_default = parse_jsonl(jsonl).unwrap();
+    let obs_large_k = parse_jsonl(jsonl).unwrap();
+
+    let raw = score_all(obs_default, &ScoreConfig::default())[0].stability_score;
+    let adj = score_all(
+        obs_large_k,
+        &ScoreConfig {
+            confidence_k: 100.0,
+            ..ScoreConfig::default()
+        },
+    )[0]
+    .adjusted_stability_score;
+
+    assert!(
+        adj < raw,
+        "large confidence_k -> adjusted score < raw score ({adj:.4} vs {raw:.4})"
+    );
+    assert!(
+        adj > 0.5,
+        "adjusted score should still be above 0.5 for high-stability sample"
+    );
 }
