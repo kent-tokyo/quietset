@@ -24,6 +24,9 @@ pub struct Observation {
     pub model_id: Option<String>,
     /// Unique identifier for this evaluation run.
     pub run_id: Option<String>,
+    /// Known correct label for this sample. When provided, `quietset reliability` uses it
+    /// instead of majority label to compute evaluator reliability.
+    pub gold_label: Option<String>,
 }
 
 impl Observation {

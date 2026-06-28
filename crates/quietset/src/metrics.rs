@@ -12,6 +12,8 @@ pub enum DecisionScore {
     Raw,
     /// Use `adjusted_stability_score` (confidence-penalised). MinRequirements still applies afterwards.
     Adjusted,
+    /// Use Wilson LCB of label_agreement for label component; confidence-adjusted for score.
+    LowerConfidenceBound,
 }
 
 /// Minimum observation counts required for a Keep decision. Samples not meeting these are demoted to Review.
@@ -89,6 +91,8 @@ pub struct ScoreConfig {
     pub min_requirements: MinRequirements,
     /// Which score value drives the keep/review/drop threshold comparison.
     pub decision_score: DecisionScore,
+    /// Confidence level for Wilson LCB. Default 0.95.
+    pub confidence_level: f64,
 }
 
 impl Default for ScoreConfig {
@@ -100,6 +104,7 @@ impl Default for ScoreConfig {
             confidence_k: 3.0,
             min_requirements: MinRequirements::default(),
             decision_score: DecisionScore::Raw,
+            confidence_level: 0.95,
         }
     }
 }
@@ -124,6 +129,12 @@ impl ScoreConfig {
             return Err(crate::error::Error::InvalidThreshold(format!(
                 "drop_threshold ({}) must be in [0.0, 1.0]",
                 t.drop
+            )));
+        }
+        if !self.confidence_level.is_finite() || !(0.0..=1.0).contains(&self.confidence_level) {
+            return Err(crate::error::Error::InvalidThreshold(format!(
+                "confidence_level ({}) must be in [0.0, 1.0]",
+                self.confidence_level
             )));
         }
         if t.drop > t.keep {
@@ -159,6 +170,40 @@ impl ScoreConfig {
     }
 }
 
+fn normal_quantile(p: f64) -> f64 {
+    let p = p.clamp(1e-10, 1.0 - 1e-10);
+    let t = if p < 0.5 {
+        (-2.0 * p.ln()).sqrt()
+    } else {
+        (-2.0 * (1.0 - p).ln()).sqrt()
+    };
+    let c = [2.515517_f64, 0.802853, 0.010328];
+    let d = [1.432788_f64, 0.189269, 0.001308];
+    let x =
+        t - (c[0] + c[1] * t + c[2] * t * t) / (1.0 + d[0] * t + d[1] * t * t + d[2] * t * t * t);
+    if p < 0.5 { -x } else { x }
+}
+
+fn wilson_lcb(successes: usize, trials: usize, confidence_level: f64) -> f64 {
+    if trials == 0 {
+        return 0.0;
+    }
+    let p = successes as f64 / trials as f64;
+    let z = normal_quantile((1.0 + confidence_level) / 2.0);
+    let n = trials as f64;
+    let z2 = z * z;
+    let num = p + z2 / (2.0 * n) - z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+    (num / (1.0 + z2 / n)).clamp(0.0, 1.0)
+}
+
+fn percentile_of_sorted(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = (p * (sorted.len() - 1) as f64).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
 /// Compute a [`StabilityReport`] for one sample from its observations.
 pub fn compute_report(
     sample_id: &str,
@@ -173,40 +218,52 @@ pub fn compute_report(
 
     // --- label stats ---
     let labels: Vec<&str> = obs.iter().filter_map(|o| o.label.as_deref()).collect();
-    let (majority_label, label_agreement, label_margin, label_entropy) = if labels.is_empty() {
-        (None, None, None, None)
-    } else {
-        let mut counts: HashMap<&str, usize> = HashMap::new();
-        for l in &labels {
-            *counts.entry(l).or_insert(0) += 1;
-        }
-        // Sort: count desc, then label asc (deterministic tiebreak)
-        let mut sorted: Vec<(&str, usize)> = counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-
-        let total = labels.len();
-        let majority = sorted[0].0;
-        let majority_count = sorted[0].1;
-
-        let agreement = Some(majority_count as f64 / total as f64);
-        let margin = if sorted.len() >= 2 {
-            Some((majority_count - sorted[1].1) as f64 / total as f64)
+    let (majority_label, label_agreement, label_margin, label_entropy, label_agreement_lcb) =
+        if labels.is_empty() {
+            (None, None, None, None, None)
         } else {
-            Some(1.0) // only one label type
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for l in &labels {
+                *counts.entry(l).or_insert(0) += 1;
+            }
+            // Sort: count desc, then label asc (deterministic tiebreak)
+            let mut sorted: Vec<(&str, usize)> = counts.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+
+            let total = labels.len();
+            let majority = sorted[0].0;
+            let majority_count = sorted[0].1;
+
+            let agreement = Some(majority_count as f64 / total as f64);
+            let margin = if sorted.len() >= 2 {
+                Some((majority_count - sorted[1].1) as f64 / total as f64)
+            } else {
+                Some(1.0) // only one label type
+            };
+            let entropy = {
+                let h: f64 = sorted
+                    .iter()
+                    .map(|(_, c)| {
+                        let p = *c as f64 / total as f64;
+                        if p > 0.0 { -p * p.log2() } else { 0.0 }
+                    })
+                    .sum();
+                let max_h = (sorted.len() as f64).log2().max(1.0);
+                Some(if sorted.len() > 1 { h / max_h } else { 0.0 })
+            };
+            let label_agreement_lcb = Some(wilson_lcb(
+                majority_count,
+                labels.len(),
+                config.confidence_level,
+            ));
+            (
+                Some(majority.to_string()),
+                agreement,
+                margin,
+                entropy,
+                label_agreement_lcb,
+            )
         };
-        let entropy = {
-            let h: f64 = sorted
-                .iter()
-                .map(|(_, c)| {
-                    let p = *c as f64 / total as f64;
-                    if p > 0.0 { -p * p.log2() } else { 0.0 }
-                })
-                .sum();
-            let max_h = (sorted.len() as f64).log2().max(1.0);
-            Some(if sorted.len() > 1 { h / max_h } else { 0.0 })
-        };
-        (Some(majority.to_string()), agreement, margin, entropy)
-    };
 
     // --- score stats ---
     let scores: Vec<f64> = obs.iter().filter_map(|o| o.score).collect();
@@ -219,6 +276,20 @@ pub fn compute_report(
         let max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
         (Some(mean), Some(std), Some(max - min))
+    };
+
+    let (score_mad, score_iqr) = if scores.len() >= 2 {
+        let mut sorted_scores = scores.clone();
+        sorted_scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = percentile_of_sorted(&sorted_scores, 0.5);
+        let mut diffs: Vec<f64> = sorted_scores.iter().map(|s| (s - median).abs()).collect();
+        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mad = percentile_of_sorted(&diffs, 0.5);
+        let q1 = percentile_of_sorted(&sorted_scores, 0.25);
+        let q3 = percentile_of_sorted(&sorted_scores, 0.75);
+        (Some(mad), Some(q3 - q1))
+    } else {
+        (None, None)
     };
 
     // --- sensitivity / agreement ---
@@ -247,7 +318,13 @@ pub fn compute_report(
         let mut wsum = 0.0_f64;
         let mut wtotal = 0.0_f64;
 
-        if let Some(la) = label_agreement {
+        // For LCB mode, use label_agreement_lcb as the label component
+        let label_for_score = match config.decision_score {
+            DecisionScore::LowerConfidenceBound => label_agreement_lcb,
+            _ => label_agreement,
+        };
+
+        if let Some(la) = label_for_score {
             wsum += la * w.label_agreement;
             wtotal += w.label_agreement;
         }
@@ -283,6 +360,7 @@ pub fn compute_report(
     let base_score = match config.decision_score {
         DecisionScore::Raw => stability_score,
         DecisionScore::Adjusted => adjusted_stability_score,
+        DecisionScore::LowerConfidenceBound => stability_score,
     };
     let mut decision = decide(base_score, &config.thresholds);
 
@@ -334,11 +412,14 @@ pub fn compute_report(
         n_observations: n,
         majority_label,
         label_agreement,
+        label_agreement_lcb,
         label_margin,
         label_entropy,
         score_mean,
         score_std,
         score_range,
+        score_mad,
+        score_iqr,
         budget_sensitivity,
         budget_slope,
         seed_sensitivity,
@@ -456,12 +537,20 @@ fn compute_budget_slope(obs: &[Observation]) -> Option<f64> {
 ///
 /// **Experimental**: reliability is computed against the majority label from the initial scoring,
 /// not a gold standard. Results are informational only.
+///
+/// If an observation has `gold_label` set, it takes priority over the majority label.
 pub fn compute_evaluator_reliability(
     observations: &[Observation],
     reports: &[StabilityReport],
 ) -> std::collections::HashMap<String, f64> {
-    // Build sample_id -> majority_label map
-    let majority_map: std::collections::HashMap<&str, &str> = reports
+    use std::collections::HashMap;
+
+    // gold_label takes priority over majority_label for ground truth
+    let gold_map: HashMap<&str, &str> = observations
+        .iter()
+        .filter_map(|o| o.gold_label.as_deref().map(|g| (o.sample_id.as_str(), g)))
+        .collect();
+    let majority_map: HashMap<&str, &str> = reports
         .iter()
         .filter_map(|r| {
             r.majority_label
@@ -470,17 +559,19 @@ pub fn compute_evaluator_reliability(
         })
         .collect();
 
-    // For each evaluator, count matches vs total
-    let mut counts: std::collections::HashMap<String, (usize, usize)> =
-        std::collections::HashMap::new();
+    let mut counts: HashMap<String, (usize, usize)> = HashMap::new();
     for obs in observations {
-        if let (Some(eval_id), Some(label)) = (obs.evaluator_id.as_deref(), obs.label.as_deref())
-            && let Some(&majority) = majority_map.get(obs.sample_id.as_str())
-        {
-            let entry = counts.entry(eval_id.to_string()).or_insert((0, 0));
-            entry.1 += 1;
-            if label == majority {
-                entry.0 += 1;
+        if let (Some(eval_id), Some(label)) = (obs.evaluator_id.as_deref(), obs.label.as_deref()) {
+            let truth = gold_map
+                .get(obs.sample_id.as_str())
+                .copied()
+                .or_else(|| majority_map.get(obs.sample_id.as_str()).copied());
+            if let Some(truth) = truth {
+                let entry = counts.entry(eval_id.to_string()).or_insert((0, 0));
+                entry.1 += 1;
+                if label == truth {
+                    entry.0 += 1;
+                }
             }
         }
     }

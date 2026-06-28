@@ -35,6 +35,13 @@ enum Commands {
     Reliability(ReliabilityArgs),
 }
 
+#[derive(ValueEnum, Clone)]
+enum DecisionScoreArg {
+    Raw,
+    Adjusted,
+    Lcb,
+}
+
 #[derive(clap::Args)]
 struct ScoreArgs {
     /// Input file (JSONL or CSV). Use '-' for stdin.
@@ -73,9 +80,22 @@ struct ScoreArgs {
     #[arg(long, default_value_t = 3.0)]
     confidence_k: f64,
 
-    /// Use adjusted_stability_score (confidence-adjusted) for keep/review/drop decisions.
+    /// Decision score mode for keep/review/drop: raw (default), adjusted, or lcb.
+    /// Overrides --use-adjusted-score and --use-lcb-score when specified.
+    #[arg(long, value_enum)]
+    decision_score: Option<DecisionScoreArg>,
+
+    /// Alias for --decision-score adjusted.
     #[arg(long)]
     use_adjusted_score: bool,
+
+    /// Alias for --decision-score lcb.
+    #[arg(long)]
+    use_lcb_score: bool,
+
+    /// Confidence level for Wilson LCB. Default 0.95.
+    #[arg(long, default_value_t = 0.95)]
+    confidence_level: f64,
 
     /// Minimum total observations required for Keep (lower-evidence samples demoted to Review).
     #[arg(long, default_value_t = 1)]
@@ -139,6 +159,10 @@ struct SummaryArgs {
     /// Output machine-readable JSON instead of formatted text.
     #[arg(long)]
     json: bool,
+
+    /// Keep threshold used during scoring (for LCB demotion analysis). Default 0.85.
+    #[arg(long, default_value_t = 0.85)]
+    keep_threshold: f64,
 }
 
 #[derive(clap::Args)]
@@ -254,11 +278,14 @@ fn write_csv_reports<W: Write>(reports: &[StabilityReport], writer: W) -> Result
         "n_observations",
         "majority_label",
         "label_agreement",
+        "label_agreement_lcb",
         "label_margin",
         "label_entropy",
         "score_mean",
         "score_std",
         "score_range",
+        "score_mad",
+        "score_iqr",
         "budget_sensitivity",
         "budget_slope",
         "seed_sensitivity",
@@ -285,6 +312,9 @@ fn write_csv_reports<W: Write>(reports: &[StabilityReport], writer: W) -> Result
             &r.label_agreement
                 .map(|v| format!("{v:.6}"))
                 .unwrap_or_default(),
+            &r.label_agreement_lcb
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
             &r.label_margin
                 .map(|v| format!("{v:.6}"))
                 .unwrap_or_default(),
@@ -294,6 +324,8 @@ fn write_csv_reports<W: Write>(reports: &[StabilityReport], writer: W) -> Result
             &r.score_mean.map(|v| format!("{v:.6}")).unwrap_or_default(),
             &r.score_std.map(|v| format!("{v:.6}")).unwrap_or_default(),
             &r.score_range.map(|v| format!("{v:.6}")).unwrap_or_default(),
+            &r.score_mad.map(|v| format!("{v:.6}")).unwrap_or_default(),
+            &r.score_iqr.map(|v| format!("{v:.6}")).unwrap_or_default(),
             &r.budget_sensitivity
                 .map(|v| format!("{v:.6}"))
                 .unwrap_or_default(),
@@ -402,11 +434,15 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             budgets: args.min_budgets_keep,
             models: args.min_models_keep,
         },
-        decision_score: if args.use_adjusted_score {
-            DecisionScore::Adjusted
-        } else {
-            DecisionScore::Raw
+        decision_score: match args.decision_score {
+            Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
+            Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
+            Some(DecisionScoreArg::Raw) => DecisionScore::Raw,
+            None if args.use_lcb_score => DecisionScore::LowerConfidenceBound,
+            None if args.use_adjusted_score => DecisionScore::Adjusted,
+            None => DecisionScore::Raw,
         },
+        confidence_level: args.confidence_level,
     };
     config.validate().context("invalid configuration")?;
     let reports = score_all(observations.clone(), &config);
@@ -522,6 +558,29 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
     let p10 = percentile(&scores, 0.10);
     let p90 = percentile(&scores, 0.90);
 
+    let lcb_keep_demotions = reports
+        .iter()
+        .filter(|r| {
+            r.label_agreement_lcb
+                .map(|v| v < args.keep_threshold)
+                .unwrap_or(false)
+        })
+        .count();
+    let has_lcb = reports.iter().any(|r| r.label_agreement_lcb.is_some());
+
+    let mad_vals: Vec<f64> = reports.iter().filter_map(|r| r.score_mad).collect();
+    let iqr_vals: Vec<f64> = reports.iter().filter_map(|r| r.score_iqr).collect();
+    let score_mad_mean = if mad_vals.is_empty() {
+        None
+    } else {
+        Some(mad_vals.iter().sum::<f64>() / mad_vals.len() as f64)
+    };
+    let score_iqr_mean = if iqr_vals.is_empty() {
+        None
+    } else {
+        Some(iqr_vals.iter().sum::<f64>() / iqr_vals.len() as f64)
+    };
+
     let mut driver_counts: HashMap<&'static str, usize> = HashMap::new();
     let unstable: Vec<&StabilityReport> = reports
         .iter()
@@ -540,7 +599,7 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
             .iter()
             .map(|(name, count)| (driver_label(name).to_string(), serde_json::json!(count)))
             .collect();
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "total": total,
             "keep": n_keep, "review": n_review, "drop": n_drop,
             "keep_rate": n_keep as f64 / total as f64,
@@ -549,6 +608,15 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
             "stability": { "mean": mean, "median": median, "p10": p10, "p90": p90 },
             "instability_drivers": instability_map,
         });
+        if has_lcb {
+            out["lcb_keep_demotions"] = serde_json::json!(lcb_keep_demotions);
+        }
+        if let Some(v) = score_mad_mean {
+            out["score_mad_mean"] = serde_json::json!(v);
+        }
+        if let Some(v) = score_iqr_mean {
+            out["score_iqr_mean"] = serde_json::json!(v);
+        }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -558,11 +626,27 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
     println!("  keep:         {:>8}  ({:.1}%)", n_keep, pct(n_keep));
     println!("  review:       {:>8}  ({:.1}%)", n_review, pct(n_review));
     println!("  drop:         {:>8}  ({:.1}%)", n_drop, pct(n_drop));
+    if has_lcb {
+        println!(
+            "  lcb_keep_demotions:{:>8}  (label_agreement_lcb < {:.2})",
+            lcb_keep_demotions, args.keep_threshold
+        );
+    }
     println!();
     println!("stability_score:");
     println!("  mean:         {:>8.4}", mean);
     println!("  median:       {:>8.4}", median);
     println!("  p10 / p90:    {:.4} / {:.4}", p10, p90);
+    if score_mad_mean.is_some() || score_iqr_mean.is_some() {
+        println!();
+        println!("score dispersion (mean across samples):");
+        if let Some(v) = score_mad_mean {
+            println!("  mad:          {:>8.4}", v);
+        }
+        if let Some(v) = score_iqr_mean {
+            println!("  iqr:          {:>8.4}", v);
+        }
+    }
     if !drivers.is_empty() && !unstable.is_empty() {
         println!();
         println!("top instability drivers (review + drop samples):");
@@ -597,11 +681,30 @@ fn run_explain(args: ExplainArgs) -> Result<()> {
     println!("stability_score:    {:.4}", report.stability_score);
     println!("confidence:         {:.4}", report.confidence);
     println!("adjusted_score:     {:.4}", report.adjusted_stability_score);
+    if let Some(v) = report.label_agreement_lcb {
+        println!("label_agreement_lcb:{:.4}", v);
+    }
     if let Some(m) = report.label_margin {
         println!("label_margin:       {:.4}", m);
     }
     if let Some(e) = report.label_entropy {
         println!("label_entropy:      {:.4}", e);
+    }
+    if report.score_mean.is_some() || report.score_mad.is_some() {
+        println!();
+        println!("score stats:");
+        if let Some(v) = report.score_mean {
+            println!("  mean:             {:.4}", v);
+        }
+        if let Some(v) = report.score_std {
+            println!("  std:              {:.4}", v);
+        }
+        if let Some(v) = report.score_mad {
+            println!("  mad:              {:.4}", v);
+        }
+        if let Some(v) = report.score_iqr {
+            println!("  iqr:              {:.4}", v);
+        }
     }
     println!();
     println!("components:");

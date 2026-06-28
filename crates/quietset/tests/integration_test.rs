@@ -1,6 +1,6 @@
 use quietset::{
     Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreWeights, Thresholds,
-    parse_jsonl, score_all,
+    compute_evaluator_reliability, parse_jsonl, score_all,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -620,5 +620,137 @@ fn test_adjusted_score_pulls_toward_half_with_large_k() {
     assert!(
         adj > 0.5,
         "adjusted score should still be above 0.5 for high-stability sample"
+    );
+}
+
+#[test]
+fn test_wilson_lcb_lower_than_raw_for_small_n() {
+    // 2/2 unanimous: label_agreement = 1.0 but LCB should be < 1.0
+    let jsonl = r#"{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"win"}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    let r = &reports[0];
+    assert_eq!(r.label_agreement, Some(1.0));
+    // LCB at 95% for 2/2 should be well below 1.0 (roughly 0.34-0.81 range)
+    let lcb = r.label_agreement_lcb.unwrap();
+    assert!(lcb < 1.0, "LCB for 2/2 should be < 1.0, got {lcb}");
+    assert!(lcb > 0.0, "LCB should be > 0.0");
+}
+
+#[test]
+fn test_wilson_lcb_high_for_large_n() {
+    // 25/25 unanimous: LCB should be very high (> 0.85)
+    // For unanimous p=1: LCB = n/(n+z^2); z≈1.96, z^2≈3.84; 25/28.84≈0.867
+    let jsonl: String = (0..25)
+        .map(|i| format!("{{\"sample_id\":\"a\",\"label\":\"win\",\"run_id\":\"{i}\"}}\n"))
+        .collect();
+    let obs = parse_jsonl(&jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    let lcb = reports[0].label_agreement_lcb.unwrap();
+    assert!(lcb > 0.85, "LCB for 25/25 should be > 0.85, got {lcb}");
+}
+
+#[test]
+fn test_lcb_policy_more_conservative_than_raw() {
+    // 3/3 unanimous, raw stability should be keep, LCB should be lower
+    let jsonl = r#"{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"win"}"#;
+    let obs_raw = parse_jsonl(jsonl).unwrap();
+    let obs_lcb = parse_jsonl(jsonl).unwrap();
+
+    let raw_reports = score_all(obs_raw, &ScoreConfig::default());
+    let lcb_reports = score_all(
+        obs_lcb,
+        &ScoreConfig {
+            decision_score: DecisionScore::LowerConfidenceBound,
+            ..ScoreConfig::default()
+        },
+    );
+    // Raw should keep (all agree), LCB stability_score should be lower
+    assert_eq!(raw_reports[0].decision, Decision::Keep);
+    // LCB stability score is lower than raw (LCB penalises low n)
+    assert!(
+        lcb_reports[0].stability_score <= raw_reports[0].stability_score,
+        "LCB stability should be <= raw: {} vs {}",
+        lcb_reports[0].stability_score,
+        raw_reports[0].stability_score
+    );
+}
+
+#[test]
+fn test_score_mad_less_sensitive_to_outlier() {
+    // Scores: 0.9, 0.9, 0.9, 0.9, 0.0 (one outlier)
+    // MAD should be much lower than std
+    let obs = vec![
+        quietset::Observation {
+            sample_id: "a".into(),
+            score: Some(0.9),
+            ..Default::default()
+        },
+        quietset::Observation {
+            sample_id: "a".into(),
+            score: Some(0.9),
+            ..Default::default()
+        },
+        quietset::Observation {
+            sample_id: "a".into(),
+            score: Some(0.9),
+            ..Default::default()
+        },
+        quietset::Observation {
+            sample_id: "a".into(),
+            score: Some(0.9),
+            ..Default::default()
+        },
+        quietset::Observation {
+            sample_id: "a".into(),
+            score: Some(0.0),
+            ..Default::default()
+        },
+    ];
+    let reports = score_all(obs, &ScoreConfig::default());
+    let r = &reports[0];
+    let std = r.score_std.unwrap();
+    let mad = r.score_mad.unwrap();
+    assert!(
+        mad < std,
+        "MAD ({mad:.4}) should be < std ({std:.4}) with one outlier"
+    );
+    assert!(
+        mad < 0.01,
+        "MAD should be near 0 (4 identical scores), got {mad:.4}"
+    );
+}
+
+#[test]
+fn test_gold_label_changes_reliability() {
+    // e1 matches majority (win is strict majority with 2 win vs 1 loss), e2 doesn't
+    // With gold_label=loss on all samples, reliability reverses
+    let jsonl_no_gold = r#"{"sample_id":"a","label":"win","evaluator_id":"e1"}
+{"sample_id":"a","label":"win","evaluator_id":"e1"}
+{"sample_id":"a","label":"loss","evaluator_id":"e2"}"#;
+
+    let jsonl_gold = r#"{"sample_id":"a","label":"win","evaluator_id":"e1","gold_label":"loss"}
+{"sample_id":"a","label":"win","evaluator_id":"e1","gold_label":"loss"}
+{"sample_id":"a","label":"loss","evaluator_id":"e2","gold_label":"loss"}"#;
+
+    let obs_no_gold = parse_jsonl(jsonl_no_gold).unwrap();
+    let obs_gold = parse_jsonl(jsonl_gold).unwrap();
+
+    let reports = score_all(obs_no_gold.clone(), &ScoreConfig::default());
+    let rel_no_gold = compute_evaluator_reliability(&obs_no_gold, &reports);
+
+    let reports_g = score_all(obs_gold.clone(), &ScoreConfig::default());
+    let rel_gold = compute_evaluator_reliability(&obs_gold, &reports_g);
+
+    // Without gold: e1 matches majority (win) -> high reliability
+    // With gold (loss): e1 doesn't match gold -> low reliability
+    let e1_no_gold = *rel_no_gold.get("e1").unwrap();
+    let e1_gold = *rel_gold.get("e1").unwrap();
+    assert!(
+        e1_no_gold > e1_gold,
+        "e1 reliability should be lower when gold_label differs: {e1_no_gold:.2} vs {e1_gold:.2}"
     );
 }

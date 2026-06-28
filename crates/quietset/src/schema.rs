@@ -86,6 +86,9 @@ pub struct StabilityReport {
     /// Fraction of observations that carry the majority label (`[0.0, 1.0]`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_agreement: Option<f64>,
+    /// Wilson confidence interval lower bound of label_agreement at `confidence_level`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_agreement_lcb: Option<f64>,
     /// (majority_count - runner_up_count) / total_labels. 1.0 if only one label type. None if no labels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_margin: Option<f64>,
@@ -101,6 +104,12 @@ pub struct StabilityReport {
     /// Difference between the maximum and minimum score (`max - min`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_range: Option<f64>,
+    /// Median absolute deviation of numeric scores. More robust to outliers than score_std.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_mad: Option<f64>,
+    /// Interquartile range of numeric scores (Q3 - Q1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_iqr: Option<f64>,
     /// Normalized range of per-budget mean scores; `None` if fewer than two budget levels. (`[0.0, 1.0]`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_sensitivity: Option<f64>,
