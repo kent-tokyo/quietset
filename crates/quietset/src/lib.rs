@@ -13,25 +13,30 @@
 //! assert_eq!(reports[0].decision, quietset::Decision::Keep);
 //! ```
 
+pub mod agreement;
+pub mod calibration;
+pub mod config;
 pub mod decision;
 pub mod error;
 pub mod group;
-pub mod metrics;
 pub mod observation;
 pub mod schema;
+pub mod scoring;
 pub mod stream;
+pub mod weighting;
 
+pub use agreement::{compute_fleiss_kappa, compute_krippendorff_alpha};
+pub use calibration::{CalibrationResult, compute_calibration};
+pub use config::{DecisionScore, MinRequirements, ScoreConfig, ScoreDispersion, ScoreWeights};
 pub use decision::Thresholds;
 pub use error::{Error, Result};
-pub use metrics::{
-    CalibrationResult, DecisionScore, MinRequirements, ScoreConfig, ScoreDispersion, ScoreWeights,
-    compute_calibration, compute_evaluator_reliability, compute_evaluator_weights,
-    compute_fleiss_kappa, compute_krippendorff_alpha, compute_report, compute_weighted_majority,
-    score_all,
-};
 pub use observation::{Observation, parse_csv, parse_jsonl};
 pub use schema::{Decision, StabilityComponents, StabilityReport};
+pub use scoring::{compute_report, score_all};
 pub use stream::StreamingScorer;
+pub use weighting::{
+    compute_evaluator_reliability, compute_evaluator_weights, compute_weighted_majority,
+};
 
 use std::collections::HashMap;
 
@@ -45,7 +50,7 @@ pub fn score_all_weighted(
     config: &ScoreConfig,
 ) -> Vec<StabilityReport> {
     // Pass 1: standard scoring
-    let mut reports = metrics::score_all(observations.clone(), config);
+    let mut reports = scoring::score_all(observations.clone(), config);
 
     // Build truth map: gold_label takes priority over majority_label
     let majority_map: HashMap<String, String> = reports
@@ -64,13 +69,13 @@ pub fn score_all_weighted(
         })
         .collect();
 
-    let evaluator_weights = metrics::compute_evaluator_weights(&observations, &truth);
+    let evaluator_weights = weighting::compute_evaluator_weights(&observations, &truth);
     let groups = group::group_by_sample_id(observations.into_iter());
 
     // Pass 2: fill weighted_* fields
     for report in &mut reports {
         if let Some(obs) = groups.get(&report.sample_id) {
-            let (wml, wlc, wld, conflict) = metrics::compute_weighted_majority(
+            let (wml, wlc, wld, conflict) = weighting::compute_weighted_majority(
                 obs,
                 report.majority_label.as_deref(),
                 &evaluator_weights,

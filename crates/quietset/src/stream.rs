@@ -1,12 +1,16 @@
-use crate::metrics::{ScoreConfig, compute_report};
+use crate::config::ScoreConfig;
 use crate::observation::Observation;
 use crate::schema::StabilityReport;
+use crate::scoring::compute_report;
 
 /// Scores observations in a single pass when they are pre-sorted by `sample_id`.
 ///
 /// Call [`push`](StreamingScorer::push) for each observation in order.
 /// It returns `Some(report)` whenever the `sample_id` changes (completing the previous group).
 /// After the last observation, call [`flush`](StreamingScorer::flush) to get the final report.
+///
+/// See the trust-boundary note on [`score_all`](crate::score_all): pushed observations are
+/// expected to already be validated; this is only checked via `debug_assert!` internally.
 ///
 /// # Example
 /// ```

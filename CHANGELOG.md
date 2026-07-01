@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.9.0 — 2026-07-01
+
+### Changed
+- **BREAKING**: the internal `quietset::metrics` module has been split into `config`, `scoring`,
+  `agreement`, `calibration`, and `weighting` modules for maintainability (`metrics.rs` had grown
+  to ~940 of the crate's ~1400 lines). The `quietset::metrics` path no longer exists. All items
+  previously re-exported from it (`ScoreConfig`, `score_all`, `compute_report`, `DecisionScore`,
+  `MinRequirements`, `ScoreDispersion`, `ScoreWeights`, `compute_fleiss_kappa`,
+  `compute_krippendorff_alpha`, `compute_calibration`, `CalibrationResult`,
+  `compute_evaluator_weights`, `compute_weighted_majority`, `compute_evaluator_reliability`)
+  remain available unchanged at the crate root (e.g. `quietset::score_all`). Only code importing
+  via the internal `quietset::metrics::*` path directly needs to update.
+- CLI `--help` text clarified for `score --output-format` and `policy --json` to document their
+  output-format conventions (see the new README "Output formats" section for the full picture
+  across all 13 subcommands).
+
+### Fixed
+- `filter` no longer silently exits 0 with zero output when every input row is invalid and
+  dropped via `--skip-invalid`; it now errors with "no records found", matching `summary`,
+  `audit`, `select`, and `recommend`.
+
 ## 0.8.0 — 2026-06-28
 
 ### Added
