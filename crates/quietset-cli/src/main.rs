@@ -98,7 +98,9 @@ struct ScoreArgs {
     #[arg(long, default_value = "jsonl", value_enum)]
     format: Format,
 
-    /// Output format.
+    /// Output format. `csv` is a terminal/export format for spreadsheets and BI
+    /// tools only — no other quietset command can read CSV back in, so `jsonl`
+    /// (the default) is the one to use if you plan to pipe the output further.
     #[arg(long, default_value = "jsonl", value_enum)]
     output_format: Format,
 
@@ -455,7 +457,9 @@ struct PolicyArgs {
     /// Report the loosest threshold that meets this coverage target.
     #[arg(long)]
     target_coverage: Option<f64>,
-    /// Output machine-readable JSONL instead of a formatted table.
+    /// Output machine-readable JSONL (one object per swept threshold) instead of
+    /// a formatted table. Note: unlike `summary`/`explain`/`compare`/`audit`'s
+    /// `--json` (a single pretty-printed object), this is a JSONL stream.
     #[arg(long)]
     json: bool,
 }
@@ -842,8 +846,12 @@ fn run_score(args: ScoreArgs) -> Result<()> {
 
 fn run_filter(args: FilterArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
+    let records = read_reports(&raw, args.skip_invalid)?;
+    if records.is_empty() {
+        anyhow::bail!("no records found");
+    }
     let mut out = open_output(args.output.as_ref())?;
-    for (line, report) in read_reports(&raw, args.skip_invalid)? {
+    for (line, report) in records {
         if args
             .min_stability
             .is_some_and(|min| report.stability_score < min)

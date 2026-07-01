@@ -135,6 +135,36 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `policy` | 観測 JSONL | keep_threshold を掃引し precision/coverage のトレードオフ表を表示 |
 | `active-review` | scored JSONL | 再評価の緊急度（低LCB・高エントロピー・分散・感度）でサンプルを順位付け |
 
+## 出力フォーマット
+
+出力の慣習はコマンドごとに意図的に異なる。人間による確認を主目的とするコマンドと、パイプライン合成
+を主目的とするコマンド（[`select`](#select-コマンド)や[`--embed-stats`](#audit-コマンド)を参照）が
+混在しているためで、単一の統一フォーマットは存在しない。スクリプトを書く前に以下の表で各コマンドの
+出力形状を確認すること:
+
+| コマンド | デフォルト | フラグ | 備考 |
+|---------|-----------|--------|------|
+| `score` | JSONL | `--output-format jsonl\|csv` | `csv`は終端フォーマット（下記参照） |
+| `filter` | JSONL（パススルー） | なし | 元の入力行をそのまま出力 |
+| `select` | JSONL（パススルー） | なし | 元の入力行をそのまま出力 |
+| `reliability` | JSONL | なし | 評価者ごとに1オブジェクト＋末尾にkappa/alphaの行（任意） |
+| `active-review` | JSONL | なし | 順位付けされたサンプルごとに1オブジェクト |
+| `recommend` | JSONL | `--text` | JSONLがデフォルトでtextが例外という唯一のコマンド |
+| `stable-wrong-risk` | 単一のpretty JSONオブジェクト | なし | |
+| `calibrate` | 単一のpretty JSONオブジェクト | なし | |
+| `summary` | text | `--json`（単一のpretty JSONオブジェクト） | |
+| `explain` | text | `--json`（単一のpretty JSONオブジェクト） | |
+| `compare` | text | `--json`（単一のpretty JSONオブジェクト） | |
+| `audit` | text | `--json`（単一のpretty JSONオブジェクト） | |
+| `policy` | textテーブル | `--json`（**JSONL**、閾値ごとに1行——上記4コマンドの単一オブジェクトとは異なる） | |
+
+**CSVはパイプ用途では行き止まり。** `score --output-format csv`はスプレッドシート/BIツール向けの
+エクスポート専用。他のどのquietsetコマンドもCSVを読み戻せない（`filter`/`summary`/`explain`/
+`compare`/`audit`/`select`/`recommend`/`active-review`はいずれもJSONL形式の`StabilityReport`を
+期待し、`stable-wrong-risk`/`calibrate`/`reliability`/`policy`はJSONL形式の`Observation`を期待す
+る）。`score`の出力を他のquietsetコマンドにパイプする予定があるなら、`csv`ではなくデフォルトの
+`jsonl`を使うこと。
+
 ## 入力 JSONL フォーマット
 
 `sample_id` 以外のフィールドはすべて省略可能です。あるフィールドだけを含むサブスコアのみが安定性計算に使われます。

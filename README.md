@@ -153,6 +153,35 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `policy` | observation JSONL | Sweep keep_threshold and show the precision/coverage trade-off table |
 | `active-review` | scored JSONL | Rank samples by re-evaluation urgency (low LCB, high entropy, dispersion, sensitivity) |
 
+## Output formats
+
+Output conventions differ by command — deliberately, since some commands are built for human
+inspection and some for pipeline composition (see [`select`](#select-command) and
+[`--embed-stats`](#audit-command)). There is no single unified format; use this table to know
+what to expect from each command before scripting against it:
+
+| Command | Default | Flag(s) | Notes |
+|---------|---------|---------|-------|
+| `score` | JSONL | `--output-format jsonl\|csv` | `csv` is a terminal/export format — see below |
+| `filter` | JSONL (pass-through) | none | Always echoes original input lines unchanged |
+| `select` | JSONL (pass-through) | none | Always echoes original input lines unchanged |
+| `reliability` | JSONL | none | One object per evaluator, plus an optional trailing kappa/alpha line |
+| `active-review` | JSONL | none | One object per ranked sample |
+| `recommend` | JSONL | `--text` | Only command where JSONL is the default and text is the opt-in |
+| `stable-wrong-risk` | single pretty JSON object | none | |
+| `calibrate` | single pretty JSON object | none | |
+| `summary` | text | `--json` (single pretty object) | |
+| `explain` | text | `--json` (single pretty object) | |
+| `compare` | text | `--json` (single pretty object) | |
+| `audit` | text | `--json` (single pretty object) | |
+| `policy` | text table | `--json` (**JSONL**, one line per swept threshold — not a single object like the four above) | |
+
+**CSV is a dead end for piping.** `score --output-format csv` exists purely for spreadsheets/BI
+tools. No other quietset command can parse CSV back in (`filter`/`summary`/`explain`/`compare`/
+`audit`/`select`/`recommend`/`active-review` all expect JSONL `StabilityReport`s;
+`stable-wrong-risk`/`calibrate`/`reliability`/`policy` expect JSONL `Observation`s). If you plan
+to pipe `score`'s output into another quietset command, use the default `jsonl`, not `csv`.
+
 ## Input JSONL format
 
 ```json
