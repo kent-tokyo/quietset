@@ -1,4 +1,6 @@
-tasks/
+tasks/*
+!tasks/lessons.md
+!tasks/todo.md
 .claude/
 target/
 .env
