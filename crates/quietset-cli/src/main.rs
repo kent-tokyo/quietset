@@ -517,6 +517,77 @@ fn read_input(input: &str) -> Result<String> {
     }
 }
 
+/// Parse JSONL observations, skipping blank lines and the `_quietset_stats` sentinel.
+/// When `skip_invalid` is set, lines that fail to parse or fail `Observation::validate`
+/// are warned about on stderr and dropped instead of aborting the whole read.
+fn read_observations_jsonl(raw: &str, skip_invalid: bool) -> Result<Vec<Observation>> {
+    if !skip_invalid {
+        return parse_jsonl(raw).context("parsing JSONL");
+    }
+    let mut obs = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.contains("\"_quietset_stats\"") {
+            continue;
+        }
+        match serde_json::from_str::<Observation>(line) {
+            Ok(o) => match o.validate(i + 1) {
+                Ok(()) => obs.push(o),
+                Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+            },
+            Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
+        }
+    }
+    Ok(obs)
+}
+
+/// Parse CSV observations. When `skip_invalid` is set, rows that fail to parse or
+/// fail `Observation::validate` are warned about on stderr and dropped instead of
+/// aborting the whole read.
+fn read_observations_csv(raw: &str, skip_invalid: bool) -> Result<Vec<Observation>> {
+    if !skip_invalid {
+        return parse_csv(raw.as_bytes()).context("parsing CSV");
+    }
+    let mut obs = Vec::new();
+    let mut rdr = csv::Reader::from_reader(raw.as_bytes());
+    for (i, record) in rdr.deserialize::<Observation>().enumerate() {
+        match record {
+            Ok(o) => match o.validate(i + 1) {
+                Ok(()) => obs.push(o),
+                Err(e) => eprintln!("warning: skipping row {}: {e}", i + 1),
+            },
+            Err(e) => eprintln!("warning: skipping row {}: {e}", i + 1),
+        }
+    }
+    Ok(obs)
+}
+
+/// Parse scored JSONL, returning each report alongside its original raw line
+/// (used by commands that pass the line through unchanged, e.g. `select`/`filter`).
+/// Skips blank lines and the `_quietset_stats` sentinel. When `skip_invalid` is set,
+/// lines that fail to parse are warned about on stderr and dropped instead of
+/// aborting the whole read.
+fn read_reports(raw: &str, skip_invalid: bool) -> Result<Vec<(String, StabilityReport)>> {
+    let mut reports = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.contains("\"_quietset_stats\"") {
+            continue;
+        }
+        match serde_json::from_str::<StabilityReport>(line) {
+            Ok(r) => reports.push((line.to_string(), r)),
+            Err(e) => {
+                if skip_invalid {
+                    eprintln!("warning: skipping line {}: {e}", i + 1);
+                } else {
+                    return Err(e).with_context(|| format!("parsing line {}", i + 1));
+                }
+            }
+        }
+    }
+    Ok(reports)
+}
+
 fn open_output(path: Option<&PathBuf>) -> Result<Box<dyn Write>> {
     match path {
         Some(p) => Ok(Box::new(
@@ -644,45 +715,9 @@ fn main() -> Result<()> {
 
 fn run_score(args: ScoreArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let observations = if args.skip_invalid {
-        match args.format {
-            Format::Jsonl => {
-                let mut obs = Vec::new();
-                for (i, line) in raw.lines().enumerate() {
-                    let line = line.trim();
-                    if line.is_empty() || line.contains("\"_quietset_stats\"") {
-                        continue;
-                    }
-                    match serde_json::from_str::<Observation>(line) {
-                        Ok(o) => match o.validate(i + 1) {
-                            Ok(()) => obs.push(o),
-                            Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-                        },
-                        Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-                    }
-                }
-                obs
-            }
-            Format::Csv => {
-                let mut obs = Vec::new();
-                let mut rdr = csv::Reader::from_reader(raw.as_bytes());
-                for (i, record) in rdr.deserialize::<Observation>().enumerate() {
-                    match record {
-                        Ok(o) => match o.validate(i + 1) {
-                            Ok(()) => obs.push(o),
-                            Err(e) => eprintln!("warning: skipping row {}: {e}", i + 1),
-                        },
-                        Err(e) => eprintln!("warning: skipping row {}: {e}", i + 1),
-                    }
-                }
-                obs
-            }
-        }
-    } else {
-        match args.format {
-            Format::Jsonl => parse_jsonl(&raw).context("parsing JSONL")?,
-            Format::Csv => parse_csv(raw.as_bytes()).context("parsing CSV")?,
-        }
+    let observations = match args.format {
+        Format::Jsonl => read_observations_jsonl(&raw, args.skip_invalid)?,
+        Format::Csv => read_observations_csv(&raw, args.skip_invalid)?,
     };
     if observations.is_empty() {
         anyhow::bail!("no observations found");
@@ -808,21 +843,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
 fn run_filter(args: FilterArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
     let mut out = open_output(args.output.as_ref())?;
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.contains("\"_quietset_stats\"") {
-            continue;
-        }
-        let report: StabilityReport = match serde_json::from_str(line) {
-            Ok(r) => r,
-            Err(e) => {
-                if args.skip_invalid {
-                    eprintln!("warning: skipping line {}: {e}", i + 1);
-                    continue;
-                }
-                return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
-            }
-        };
+    for (line, report) in read_reports(&raw, args.skip_invalid)? {
         if args
             .min_stability
             .is_some_and(|min| report.stability_score < min)
@@ -872,23 +893,10 @@ fn run_filter(args: FilterArgs) -> Result<()> {
 
 fn run_summary(args: SummaryArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let mut reports: Vec<StabilityReport> = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.contains("\"_quietset_stats\"") {
-            continue;
-        }
-        match serde_json::from_str(line) {
-            Ok(r) => reports.push(r),
-            Err(e) => {
-                if args.skip_invalid {
-                    eprintln!("warning: skipping line {}: {e}", i + 1);
-                } else {
-                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
-                }
-            }
-        }
-    }
+    let reports: Vec<StabilityReport> = read_reports(&raw, args.skip_invalid)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
     if reports.is_empty() {
         anyhow::bail!("no records found");
     }
@@ -1309,34 +1317,24 @@ fn run_audit(args: AuditArgs) -> Result<()> {
     };
 
     let raw = read_input(&args.input)?;
-    let mut reports: Vec<StabilityReport> = Vec::new();
-    let mut embedded_kappa: Option<f64> = None;
-    let mut embedded_alpha: Option<f64> = None;
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.contains("\"_quietset_stats\"") {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                embedded_kappa = v["fleiss_kappa"].as_f64().or(embedded_kappa);
-                embedded_alpha = v["krippendorff_alpha"].as_f64().or(embedded_alpha);
-            }
-            continue;
-        }
-        match serde_json::from_str(line) {
-            Ok(r) => reports.push(r),
-            Err(e) => {
-                if args.skip_invalid {
-                    eprintln!("warning: skipping line {}: {e}", i + 1);
-                } else {
-                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
-                }
-            }
-        }
-    }
+    let reports: Vec<StabilityReport> = read_reports(&raw, args.skip_invalid)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
     if reports.is_empty() {
         anyhow::bail!("no records found");
+    }
+
+    let mut embedded_kappa: Option<f64> = None;
+    let mut embedded_alpha: Option<f64> = None;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.contains("\"_quietset_stats\"")
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+        {
+            embedded_kappa = v["fleiss_kappa"].as_f64().or(embedded_kappa);
+            embedded_alpha = v["krippendorff_alpha"].as_f64().or(embedded_alpha);
+        }
     }
 
     let total = reports.len();
@@ -1627,23 +1625,7 @@ fn run_audit(args: AuditArgs) -> Result<()> {
 
 fn run_select(args: SelectArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let mut lines_and_reports: Vec<(String, StabilityReport)> = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.contains("\"_quietset_stats\"") {
-            continue;
-        }
-        match serde_json::from_str::<StabilityReport>(line) {
-            Ok(r) => lines_and_reports.push((line.to_string(), r)),
-            Err(e) => {
-                if args.skip_invalid {
-                    eprintln!("warning: skipping line {}: {e}", i + 1);
-                } else {
-                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
-                }
-            }
-        }
-    }
+    let lines_and_reports: Vec<(String, StabilityReport)> = read_reports(&raw, args.skip_invalid)?;
     if lines_and_reports.is_empty() {
         anyhow::bail!("no records found");
     }
@@ -1735,23 +1717,10 @@ fn run_select(args: SelectArgs) -> Result<()> {
 
 fn run_recommend(args: RecommendArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let mut reports: Vec<StabilityReport> = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.contains("\"_quietset_stats\"") {
-            continue;
-        }
-        match serde_json::from_str(line) {
-            Ok(r) => reports.push(r),
-            Err(e) => {
-                if args.skip_invalid {
-                    eprintln!("warning: skipping line {}: {e}", i + 1);
-                } else {
-                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
-                }
-            }
-        }
-    }
+    let reports: Vec<StabilityReport> = read_reports(&raw, args.skip_invalid)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
     if reports.is_empty() {
         anyhow::bail!("no records found");
     }
@@ -1857,25 +1826,7 @@ fn run_recommend(args: RecommendArgs) -> Result<()> {
 
 fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let observations = if args.skip_invalid {
-        let mut obs = Vec::new();
-        for (i, line) in raw.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.contains("\"_quietset_stats\"") {
-                continue;
-            }
-            match serde_json::from_str::<Observation>(line) {
-                Ok(o) => match o.validate(i + 1) {
-                    Ok(()) => obs.push(o),
-                    Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-                },
-                Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-            }
-        }
-        obs
-    } else {
-        parse_jsonl(&raw).context("parsing JSONL")?
-    };
+    let observations = read_observations_jsonl(&raw, args.skip_invalid)?;
     if observations.is_empty() {
         anyhow::bail!("no observations found");
     }
@@ -1956,25 +1907,7 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
 
 fn run_calibrate(args: CalibrateArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let observations = if args.skip_invalid {
-        let mut obs = Vec::new();
-        for (i, line) in raw.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.contains("\"_quietset_stats\"") {
-                continue;
-            }
-            match serde_json::from_str::<Observation>(line) {
-                Ok(o) => match o.validate(i + 1) {
-                    Ok(()) => obs.push(o),
-                    Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-                },
-                Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-            }
-        }
-        obs
-    } else {
-        parse_jsonl(&raw).context("parsing JSONL")?
-    };
+    let observations = read_observations_jsonl(&raw, args.skip_invalid)?;
     if observations.is_empty() {
         anyhow::bail!("no observations found");
     }
@@ -2017,25 +1950,7 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
 
 fn run_reliability(args: ReliabilityArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let observations = if args.skip_invalid {
-        let mut obs = Vec::new();
-        for (i, line) in raw.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.contains("\"_quietset_stats\"") {
-                continue;
-            }
-            match serde_json::from_str::<Observation>(line) {
-                Ok(o) => match o.validate(i + 1) {
-                    Ok(()) => obs.push(o),
-                    Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-                },
-                Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-            }
-        }
-        obs
-    } else {
-        parse_jsonl(&raw).context("parsing JSONL")?
-    };
+    let observations = read_observations_jsonl(&raw, args.skip_invalid)?;
     if observations.is_empty() {
         anyhow::bail!("no observations found");
     }
@@ -2121,25 +2036,7 @@ fn driver_label(name: &str) -> &str {
 
 fn run_policy(args: PolicyArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let observations = if args.skip_invalid {
-        let mut obs = Vec::new();
-        for (i, line) in raw.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.contains("\"_quietset_stats\"") {
-                continue;
-            }
-            match serde_json::from_str::<Observation>(line) {
-                Ok(o) => match o.validate(i + 1) {
-                    Ok(()) => obs.push(o),
-                    Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-                },
-                Err(e) => eprintln!("warning: skipping line {}: {e}", i + 1),
-            }
-        }
-        obs
-    } else {
-        parse_jsonl(&raw).context("parsing JSONL")?
-    };
+    let observations = read_observations_jsonl(&raw, args.skip_invalid)?;
     if observations.is_empty() {
         anyhow::bail!("no observations found");
     }
@@ -2308,23 +2205,10 @@ fn run_policy(args: PolicyArgs) -> Result<()> {
 
 fn run_active_review(args: ActiveReviewArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let mut reports: Vec<StabilityReport> = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.contains("\"_quietset_stats\"") {
-            continue;
-        }
-        match serde_json::from_str(line) {
-            Ok(r) => reports.push(r),
-            Err(e) => {
-                if args.skip_invalid {
-                    eprintln!("warning: skipping line {}: {e}", i + 1);
-                } else {
-                    return Err(e).with_context(|| format!("parsing JSONL at line {}", i + 1));
-                }
-            }
-        }
-    }
+    let reports: Vec<StabilityReport> = read_reports(&raw, args.skip_invalid)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
     if reports.is_empty() {
         anyhow::bail!("no records found");
     }
