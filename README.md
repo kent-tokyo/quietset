@@ -150,6 +150,8 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `recommend` | scored JSONL | Per-sample re-evaluation suggestions with reasons |
 | `stable-wrong-risk` | observation JSONL | Rate of stably-wrong kept samples (requires `gold_label`) |
 | `calibrate` | observation JSONL | Find keep_threshold meeting a precision/coverage target |
+| `policy` | observation JSONL | Sweep keep_threshold and show the precision/coverage trade-off table |
+| `active-review` | scored JSONL | Rank samples by re-evaluation urgency (low LCB, high entropy, dispersion, sensitivity) |
 
 ## Input JSONL format
 
@@ -256,7 +258,7 @@ Apply a use-case preset with `--profile` instead of tuning weights manually. Exp
 |---------|---------------|----------------------|
 | `llm-judge` | evaluator ×2, model ×2 | `lcb` |
 | `simulation` | budget ×2, seed ×2 | `adjusted` |
-| `game-ai` | budget ×2, seed ×1.5; min-observations 3 | `adjusted` |
+| `game-ai` | budget ×2, seed ×2; min-observations 4, min-budgets 2, min-seeds 2 | `lcb` |
 | `benchmark` | label ×2, evaluator ×1.5 | `raw` |
 
 ```bash
@@ -686,6 +688,48 @@ policy comparison: current → lcb (keep_threshold=0.85):
 > Other components are not recomputed, so results are approximate. Use for directional signal
 > ("how many keeps would be demoted"), not precise prediction.
 
+## policy command
+
+Sweeps `keep_threshold` from 0.99 down to 0.50 and reports the precision/coverage/stable-wrong-rate
+trade-off at each step, so you can pick a threshold before running `score`:
+
+```bash
+quietset policy input.jsonl
+quietset policy input.jsonl --target-precision 0.95
+quietset policy input.jsonl --decision-score lcb --json
+```
+
+```
+threshold  n_keep  coverage
+0.99            1     0.500
+0.98            1     0.500
+0.97            1     0.500
+```
+
+With `gold_label` present on observations, the table also gains `precision` and
+`stable_wrong_rate` columns. `--target-precision`/`--target-coverage` mark the loosest
+threshold meeting that target with `←`. `--json` emits one JSONL object per threshold row instead
+of the formatted table.
+
+## active-review command
+
+Ranks scored JSONL samples by re-evaluation urgency — a weighted combination of low
+`label_agreement_lcb`, high `label_entropy`, high `score_mad`, and high budget/seed sensitivity:
+
+```bash
+quietset score input.jsonl | quietset active-review -
+quietset active-review scored.jsonl --unstable-only --top 20
+```
+
+```json
+{"budget_sensitivity":0.62,"label_agreement_lcb":0.095,"label_entropy":1.0,"primary_reason":"high_entropy","sample_id":"b","seed_sensitivity":0.62,"suggested_action":"diversify_evaluators","urgency_score":0.691}
+```
+
+`--unstable-only` skips samples already decided `keep` with no instability signals. Per-signal
+`--weight-*` flags (`--weight-lcb`, `--weight-entropy`, `--weight-score-mad`,
+`--weight-budget-sensitivity`, `--weight-seed-sensitivity`) let you emphasize the signal most
+relevant to your review budget.
+
 ## Rust API
 
 ```rust
@@ -735,11 +779,17 @@ cd crates/quietset-py && maturin develop
 
 ```python
 import quietset
-reports = quietset.score_all(observations)
+result = quietset.score_jsonl(
+    '{"sample_id":"a","label":"win","score":0.9}\n'
+    '{"sample_id":"a","label":"win","score":0.8}\n'
+)
+print(result)
 ```
 
-The CLI is the stable interface; use Python bindings for embedding in existing Python pipelines
-where spawning a subprocess is impractical.
+The bindings currently expose a single function, `score_jsonl`, which scores a JSONL string with
+default settings and returns a JSONL string of results. The CLI is the stable interface with the
+full set of commands and options; use Python bindings for embedding basic scoring in existing
+Python pipelines where spawning a subprocess is impractical.
 
 ## License
 

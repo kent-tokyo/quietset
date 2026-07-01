@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Filter datasets by label stability across evaluators, budgets, seeds, and models"
 repository = "https://github.com/kent-tokyo/quietset"
 homepage = "https://github.com/kent-tokyo/quietset"
+readme = "../../README.md"
 keywords = ["dataset", "label", "stability", "filtering", "evaluation"]
 categories = ["science", "command-line-utilities", "algorithms"]
 

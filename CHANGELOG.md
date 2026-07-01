@@ -53,10 +53,18 @@
 
 ## 0.4.0 — 2026-06-28
 
+### Changed
+- Synced README/CHANGELOG documentation for the Fleiss' kappa / Krippendorff's alpha additions from 0.3.0
+- `quietset-cli`'s dependency on `quietset` bumped to 0.4.0
+
+## 0.3.0 — 2026-06-28
+
 ### Added
 - `compute_fleiss_kappa()` — inter-rater agreement corrected for chance; nominal labels, variable raters per subject; exported from `quietset` crate
 - `compute_krippendorff_alpha()` — coincidence-matrix formulation for nominal labels, variable raters; exported from `quietset` crate
 - `reliability` command now appends a trailing JSONL line `{"fleiss_kappa": ..., "krippendorff_alpha": ...}` after per-evaluator lines; omitted when fewer than 2 subjects have ≥ 2 ratings
+
+## 0.2.0 — 2026-06-28
 
 ### Added
 - `label_agreement_lcb` on `StabilityReport` — Wilson confidence interval lower bound of `label_agreement`; guards against over-confidence on low-n samples

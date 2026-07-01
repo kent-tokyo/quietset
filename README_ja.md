@@ -132,6 +132,8 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `recommend` | scored JSONL | 再評価候補と理由を提案 |
 | `stable-wrong-risk` | 観測 JSONL | 安定的に誤ラベルの keep サンプル率（`gold_label` 必須） |
 | `calibrate` | 観測 JSONL | 精度目標を満たす keep 閾値を自動探索 |
+| `policy` | 観測 JSONL | keep_threshold を掃引し precision/coverage のトレードオフ表を表示 |
+| `active-review` | scored JSONL | 再評価の緊急度（低LCB・高エントロピー・分散・感度）でサンプルを順位付け |
 
 ## 入力 JSONL フォーマット
 
@@ -238,7 +240,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 |------------|--------|------------------------|
 | `llm-judge` | evaluator ×2、model ×2 | `lcb` |
 | `simulation` | budget ×2、seed ×2 | `adjusted` |
-| `game-ai` | budget ×2、seed ×1.5、最低観測数 3 | `adjusted` |
+| `game-ai` | budget ×2、seed ×2、最低観測数 4、最低budget数 2、最低seed数 2 | `lcb` |
 | `benchmark` | label ×2、evaluator ×1.5 | `raw` |
 
 ```bash
@@ -528,6 +530,136 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 
 `keep_threshold` を 0.99 から 0.50 まで 0.01 刻みで探索し、精度目標を満たす最も緩い閾値を返します。
 `gold_label` がない場合や目標を達成できない場合はエラーになります（`--target-precision` を下げてください）。
+
+## select コマンド
+
+診断クラスでサンプルを抽出し、元の scored JSONL 行をそのまま出力します（パススルー、他コマンドへパイプ可能）:
+
+```bash
+quietset select scored.jsonl --class borderline --top 100
+quietset select scored.jsonl --class high-raw-low-lcb > uncertain_keeps.jsonl
+quietset select scored.jsonl --class budget-sensitive --top 20 | quietset explain - --sample-id x
+```
+
+| クラス | 抽出内容 |
+|-------|---------|
+| `borderline` | `keep_threshold ± 0.10` の安定性帯（不確実ゾーン） |
+| `high-disagreement` | `disagreement_score` 降順 |
+| `budget-sensitive` | `budget_sensitivity` 降順 |
+| `seed-sensitive` | `seed_sensitivity` 降順 |
+| `high-raw-low-lcb` | `stability_score >= keep_threshold` だが `label_agreement_lcb < keep_threshold` |
+| `high-score-mad` | `score_mad` 降順 |
+
+`--top N` で出力数を制限します。`--keep-threshold` で `borderline`/`high-raw-low-lcb` の帯を調整できます（デフォルト 0.85）。
+
+## recommend コマンド
+
+問題が検出された各サンプルに対し、優先順位付きで再評価の提案を出力します:
+
+```bash
+quietset recommend scored.jsonl
+quietset recommend scored.jsonl --unstable-only   # 問題のない keep をスキップ
+```
+
+```json
+{"sample_id": "x42", "reason": "high_raw_low_lcb", "recommended_action": "add_observations", "stability_score": 0.91, "label_agreement_lcb": 0.34, "n_observations": 2}
+{"sample_id": "y17", "reason": "high_seed_sensitivity", "recommended_action": "add_seeds", "seed_sensitivity": 0.71}
+```
+
+| 理由 | 対応 |
+|--------|--------|
+| `high_raw_low_lcb` | raw の安定性は高いが LCB が閾値未満 → `add_observations` |
+| `low_evaluator_agreement` | evaluator_agreement < 0.7 → `add_evaluators` |
+| `high_seed_sensitivity` | seed_sensitivity > 0.3 → `add_seeds` |
+| `high_budget_sensitivity` | budget_sensitivity > 0.3 → `increase_budget` |
+| `low_model_agreement` | model_agreement < 0.7 → `add_models` |
+
+各サンプルにつき最大1件の提案（優先度が最も高いルールが採用されます）。
+
+## stable-wrong-risk コマンド
+
+観測 JSONL を内部でスコアリングし、`majority_label` が `gold_label` と異なる keep サンプルを報告します:
+
+```bash
+quietset stable-wrong-risk input.jsonl
+quietset stable-wrong-risk input.jsonl --keep-threshold 0.90
+```
+
+```json
+{
+  "n_total": 1000,
+  "n_keep": 621,
+  "n_stable_wrong": 12,
+  "stable_wrong_rate_among_keep": 0.019,
+  "samples": [
+    {"sample_id": "x42", "stability_score": 0.96, "majority_label": "loss", "gold_label": "win"}
+  ]
+}
+```
+
+`gold_label` が必須です。`stability_score` 降順にソートされ、最も自信を持って keep されている誤りサンプルが先頭に来ます。`--top N` でサンプル数を制限できます。
+
+## compare --policy-after
+
+通常の比較出力に加えて、after ファイルの判定が仮の decision-score ポリシーの下でどう変わるかを表示します:
+
+```bash
+quietset compare before.jsonl after.jsonl --policy-after lcb
+quietset compare before.jsonl after.jsonl --policy-after adjusted --policy-keep-threshold 0.80
+```
+
+```
+policy comparison: current → lcb (keep_threshold=0.85):
+              →keep   →review    →drop
+    keep↓         0       850        0
+  review↓         0      2291      300
+    drop↓         0         0      200
+  demoted by policy: 850  promoted: 0
+```
+
+> **注意:** `--policy-after lcb` は `label_agreement_lcb` を LCB ポリシースコアの近似値として使用します。
+> 他のコンポーネントは再計算されないため、結果は近似値です。正確な予測ではなく方向性の参考
+> （「ポリシーによって何件が降格されるか」）としてお使いください。
+
+## policy コマンド
+
+`keep_threshold` を 0.99 から 0.50 まで掃引し、各段階での precision/coverage/stable-wrong-rate の
+トレードオフを表示します。`score` を実行する前に閾値を選ぶのに使えます:
+
+```bash
+quietset policy input.jsonl
+quietset policy input.jsonl --target-precision 0.95
+quietset policy input.jsonl --decision-score lcb --json
+```
+
+```
+threshold  n_keep  coverage
+0.99            1     0.500
+0.98            1     0.500
+0.97            1     0.500
+```
+
+観測に `gold_label` があれば、表に `precision` と `stable_wrong_rate` の列も追加されます。
+`--target-precision`/`--target-coverage` は目標を満たす最も緩い閾値を `←` で示します。
+`--json` は整形テーブルの代わりに閾値ごとに1行のJSONLを出力します。
+
+## active-review コマンド
+
+scored JSONL を、低い `label_agreement_lcb`・高い `label_entropy`・高い `score_mad`・高い budget/seed
+感度を重み付け合成した「再評価の緊急度」でランク付けします:
+
+```bash
+quietset score input.jsonl | quietset active-review -
+quietset active-review scored.jsonl --unstable-only --top 20
+```
+
+```json
+{"budget_sensitivity":0.62,"label_agreement_lcb":0.095,"label_entropy":1.0,"primary_reason":"high_entropy","sample_id":"b","seed_sensitivity":0.62,"suggested_action":"diversify_evaluators","urgency_score":0.691}
+```
+
+`--unstable-only` は問題のない keep サンプルをスキップします。信号ごとの `--weight-*` フラグ
+（`--weight-lcb`、`--weight-entropy`、`--weight-score-mad`、`--weight-budget-sensitivity`、
+`--weight-seed-sensitivity`）で、レビュー予算に応じて重視する信号を調整できます。
 
 ## Rust API
 
