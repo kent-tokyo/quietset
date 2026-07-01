@@ -891,16 +891,26 @@ fn run_filter(args: FilterArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_summary(args: SummaryArgs) -> Result<()> {
-    let raw = read_input(&args.input)?;
-    let reports: Vec<StabilityReport> = read_reports(&raw, args.skip_invalid)?
-        .into_iter()
-        .map(|(_, r)| r)
-        .collect();
-    if reports.is_empty() {
-        anyhow::bail!("no records found");
-    }
+/// Aggregation shared by `summary` and `audit`: counts, stability_score stats,
+/// dispersion means, lcb_keep_demotions, and instability drivers.
+struct AggregateStats {
+    total: usize,
+    n_keep: usize,
+    n_review: usize,
+    n_drop: usize,
+    mean: f64,
+    median: f64,
+    p10: f64,
+    p90: f64,
+    mad_mean: Option<f64>,
+    iqr_mean: Option<f64>,
+    lcb_keep_demotions: usize,
+    has_lcb: bool,
+    unstable_count: usize,
+    drivers: Vec<(&'static str, usize)>,
+}
 
+fn compute_aggregate_stats(reports: &[StabilityReport], keep_threshold: f64) -> AggregateStats {
     let total = reports.len();
     let n_keep = reports
         .iter()
@@ -922,101 +932,140 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
     let p10 = percentile(&scores, 0.10);
     let p90 = percentile(&scores, 0.90);
 
-    let lcb_keep_demotions = reports
-        .iter()
-        .filter(|r| {
-            r.stability_score >= args.keep_threshold
-                && r.label_agreement_lcb
-                    .map(|v| v < args.keep_threshold)
-                    .unwrap_or(false)
-        })
-        .count();
-    let has_lcb = reports.iter().any(|r| r.label_agreement_lcb.is_some());
-
     let mad_vals: Vec<f64> = reports.iter().filter_map(|r| r.score_mad).collect();
     let iqr_vals: Vec<f64> = reports.iter().filter_map(|r| r.score_iqr).collect();
-    let score_mad_mean = if mad_vals.is_empty() {
+    let mad_mean = if mad_vals.is_empty() {
         None
     } else {
         Some(mad_vals.iter().sum::<f64>() / mad_vals.len() as f64)
     };
-    let score_iqr_mean = if iqr_vals.is_empty() {
+    let iqr_mean = if iqr_vals.is_empty() {
         None
     } else {
         Some(iqr_vals.iter().sum::<f64>() / iqr_vals.len() as f64)
     };
 
-    let mut driver_counts: HashMap<&'static str, usize> = HashMap::new();
-    let unstable: Vec<&StabilityReport> = reports
+    let lcb_keep_demotions = reports
         .iter()
-        .filter(|r| r.decision != Decision::Keep)
-        .collect();
-    for r in &unstable {
+        .filter(|r| {
+            r.stability_score >= keep_threshold
+                && r.label_agreement_lcb.is_some_and(|v| v < keep_threshold)
+        })
+        .count();
+    let has_lcb = reports.iter().any(|r| r.label_agreement_lcb.is_some());
+
+    let mut driver_counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut unstable_count = 0usize;
+    for r in reports.iter().filter(|r| r.decision != Decision::Keep) {
+        unstable_count += 1;
         if let Some((name, _)) = r.components.weakest() {
             *driver_counts.entry(name).or_insert(0) += 1;
         }
     }
-    let mut drivers: Vec<(&str, usize)> = driver_counts.into_iter().collect();
+    let mut drivers: Vec<(&'static str, usize)> = driver_counts.into_iter().collect();
     drivers.sort_by_key(|d| Reverse(d.1));
 
+    AggregateStats {
+        total,
+        n_keep,
+        n_review,
+        n_drop,
+        mean,
+        median,
+        p10,
+        p90,
+        mad_mean,
+        iqr_mean,
+        lcb_keep_demotions,
+        has_lcb,
+        unstable_count,
+        drivers,
+    }
+}
+
+fn run_summary(args: SummaryArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let reports: Vec<StabilityReport> = read_reports(&raw, args.skip_invalid)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
+    if reports.is_empty() {
+        anyhow::bail!("no records found");
+    }
+
+    let stats = compute_aggregate_stats(&reports, args.keep_threshold);
+
     if args.json {
-        let instability_map: serde_json::Map<String, serde_json::Value> = drivers
+        let instability_map: serde_json::Map<String, serde_json::Value> = stats
+            .drivers
             .iter()
             .map(|(name, count)| (driver_label(name).to_string(), serde_json::json!(count)))
             .collect();
         let mut out = serde_json::json!({
-            "total": total,
-            "keep": n_keep, "review": n_review, "drop": n_drop,
-            "keep_rate": n_keep as f64 / total as f64,
-            "review_rate": n_review as f64 / total as f64,
-            "drop_rate": n_drop as f64 / total as f64,
-            "stability": { "mean": mean, "median": median, "p10": p10, "p90": p90 },
+            "total": stats.total,
+            "keep": stats.n_keep, "review": stats.n_review, "drop": stats.n_drop,
+            "keep_rate": stats.n_keep as f64 / stats.total as f64,
+            "review_rate": stats.n_review as f64 / stats.total as f64,
+            "drop_rate": stats.n_drop as f64 / stats.total as f64,
+            "stability": { "mean": stats.mean, "median": stats.median, "p10": stats.p10, "p90": stats.p90 },
             "instability_drivers": instability_map,
         });
-        if has_lcb {
-            out["lcb_keep_demotions"] = serde_json::json!(lcb_keep_demotions);
+        if stats.has_lcb {
+            out["lcb_keep_demotions"] = serde_json::json!(stats.lcb_keep_demotions);
         }
-        if let Some(v) = score_mad_mean {
+        if let Some(v) = stats.mad_mean {
             out["score_mad_mean"] = serde_json::json!(v);
         }
-        if let Some(v) = score_iqr_mean {
+        if let Some(v) = stats.iqr_mean {
             out["score_iqr_mean"] = serde_json::json!(v);
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
 
-    let pct = |n: usize| n as f64 / total as f64 * 100.0;
-    println!("samples:        {:>8}", total);
-    println!("  keep:         {:>8}  ({:.1}%)", n_keep, pct(n_keep));
-    println!("  review:       {:>8}  ({:.1}%)", n_review, pct(n_review));
-    println!("  drop:         {:>8}  ({:.1}%)", n_drop, pct(n_drop));
-    if has_lcb {
+    let pct = |n: usize| n as f64 / stats.total as f64 * 100.0;
+    println!("samples:        {:>8}", stats.total);
+    println!(
+        "  keep:         {:>8}  ({:.1}%)",
+        stats.n_keep,
+        pct(stats.n_keep)
+    );
+    println!(
+        "  review:       {:>8}  ({:.1}%)",
+        stats.n_review,
+        pct(stats.n_review)
+    );
+    println!(
+        "  drop:         {:>8}  ({:.1}%)",
+        stats.n_drop,
+        pct(stats.n_drop)
+    );
+    if stats.has_lcb {
         println!(
             "  lcb_keep_demotions:{:>8}  (stability_score >= {:.2}, label_agreement_lcb < {:.2})",
-            lcb_keep_demotions, args.keep_threshold, args.keep_threshold
+            stats.lcb_keep_demotions, args.keep_threshold, args.keep_threshold
         );
     }
     println!();
     println!("stability_score:");
-    println!("  mean:         {:>8.4}", mean);
-    println!("  median:       {:>8.4}", median);
-    println!("  p10 / p90:    {:.4} / {:.4}", p10, p90);
-    if score_mad_mean.is_some() || score_iqr_mean.is_some() {
+    println!("  mean:         {:>8.4}", stats.mean);
+    println!("  median:       {:>8.4}", stats.median);
+    println!("  p10 / p90:    {:.4} / {:.4}", stats.p10, stats.p90);
+    if stats.mad_mean.is_some() || stats.iqr_mean.is_some() {
         println!();
         println!("score dispersion (mean across samples):");
-        if let Some(v) = score_mad_mean {
+        if let Some(v) = stats.mad_mean {
             println!("  mad:          {:>8.4}", v);
         }
-        if let Some(v) = score_iqr_mean {
+        if let Some(v) = stats.iqr_mean {
             println!("  iqr:          {:>8.4}", v);
         }
     }
-    if !drivers.is_empty() && !unstable.is_empty() {
+    if !stats.drivers.is_empty() && stats.unstable_count > 0 {
         println!();
         println!("top instability drivers (review + drop samples):");
-        for (name, count) in drivers.iter().take(6) {
-            let pct_driver = *count as f64 / unstable.len() as f64 * 100.0;
+        for (name, count) in stats.drivers.iter().take(6) {
+            let pct_driver = *count as f64 / stats.unstable_count as f64 * 100.0;
             println!("  {:<24} {:.0}%", driver_label(name), pct_driver);
         }
     }
@@ -1337,62 +1386,7 @@ fn run_audit(args: AuditArgs) -> Result<()> {
         }
     }
 
-    let total = reports.len();
-    let n_keep = reports
-        .iter()
-        .filter(|r| r.decision == Decision::Keep)
-        .count();
-    let n_review = reports
-        .iter()
-        .filter(|r| r.decision == Decision::Review)
-        .count();
-    let n_drop = reports
-        .iter()
-        .filter(|r| r.decision == Decision::Drop)
-        .count();
-
-    let mut scores: Vec<f64> = reports.iter().map(|r| r.stability_score).collect();
-    scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let smean = scores.iter().sum::<f64>() / scores.len() as f64;
-    let smedian = percentile(&scores, 0.50);
-    let sp10 = percentile(&scores, 0.10);
-    let sp90 = percentile(&scores, 0.90);
-
-    let mad_vals: Vec<f64> = reports.iter().filter_map(|r| r.score_mad).collect();
-    let iqr_vals: Vec<f64> = reports.iter().filter_map(|r| r.score_iqr).collect();
-    let mad_mean = if mad_vals.is_empty() {
-        None
-    } else {
-        Some(mad_vals.iter().sum::<f64>() / mad_vals.len() as f64)
-    };
-    let iqr_mean = if iqr_vals.is_empty() {
-        None
-    } else {
-        Some(iqr_vals.iter().sum::<f64>() / iqr_vals.len() as f64)
-    };
-
-    let lcb_keep_demotions = reports
-        .iter()
-        .filter(|r| {
-            r.stability_score >= args.keep_threshold
-                && r.label_agreement_lcb
-                    .is_some_and(|v| v < args.keep_threshold)
-        })
-        .count();
-    let has_lcb = reports.iter().any(|r| r.label_agreement_lcb.is_some());
-
-    let mut driver_counts: HashMap<&'static str, usize> = HashMap::new();
-    let unstable: Vec<&StabilityReport> = reports
-        .iter()
-        .filter(|r| r.decision != Decision::Keep)
-        .collect();
-    for r in &unstable {
-        if let Some((name, _)) = r.components.weakest() {
-            *driver_counts.entry(name).or_insert(0) += 1;
-        }
-    }
-    let mut drivers: Vec<(&str, usize)> = driver_counts.into_iter().collect();
-    drivers.sort_by_key(|d| Reverse(d.1));
+    let stats = compute_aggregate_stats(&reports, args.keep_threshold);
 
     let borderline_lo = (args.keep_threshold - 0.10).max(0.0);
     let borderline_hi = (args.keep_threshold + 0.10).min(1.0);
@@ -1455,26 +1449,26 @@ fn run_audit(args: AuditArgs) -> Result<()> {
     let top = args.top;
 
     if args.json {
-        let pct = |n: usize| n as f64 / total as f64;
+        let pct = |n: usize| n as f64 / stats.total as f64;
         let mut out = serde_json::json!({
-            "total": total,
-            "keep": n_keep, "review": n_review, "drop": n_drop,
-            "keep_rate": pct(n_keep), "review_rate": pct(n_review), "drop_rate": pct(n_drop),
-            "stability": { "mean": smean, "median": smedian, "p10": sp10, "p90": sp90 },
-            "instability_drivers": drivers.iter().map(|(n, c)| (driver_label(n).to_string(), serde_json::json!(c))).collect::<serde_json::Map<_,_>>(),
+            "total": stats.total,
+            "keep": stats.n_keep, "review": stats.n_review, "drop": stats.n_drop,
+            "keep_rate": pct(stats.n_keep), "review_rate": pct(stats.n_review), "drop_rate": pct(stats.n_drop),
+            "stability": { "mean": stats.mean, "median": stats.median, "p10": stats.p10, "p90": stats.p90 },
+            "instability_drivers": stats.drivers.iter().map(|(n, c)| (driver_label(n).to_string(), serde_json::json!(c))).collect::<serde_json::Map<_,_>>(),
             "borderline": borderline.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "stability_score": r.stability_score, "decision": format!("{}", r.decision)})).collect::<Vec<_>>(),
             "high_raw_low_lcb": high_raw_low_lcb.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "stability_score": r.stability_score, "label_agreement_lcb": r.label_agreement_lcb})).collect::<Vec<_>>(),
             "high_score_mad": high_score_mad.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "score_mad": r.score_mad})).collect::<Vec<_>>(),
             "budget_sensitive": budget_sensitive.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "budget_sensitivity": r.budget_sensitivity})).collect::<Vec<_>>(),
             "seed_sensitive": seed_sensitive.iter().take(top).map(|r| serde_json::json!({"sample_id": r.sample_id, "seed_sensitivity": r.seed_sensitivity})).collect::<Vec<_>>(),
         });
-        if has_lcb {
-            out["lcb_keep_demotions"] = serde_json::json!(lcb_keep_demotions);
+        if stats.has_lcb {
+            out["lcb_keep_demotions"] = serde_json::json!(stats.lcb_keep_demotions);
         }
-        if let Some(v) = mad_mean {
+        if let Some(v) = stats.mad_mean {
             out["score_mad_mean"] = serde_json::json!(v);
         }
-        if let Some(v) = iqr_mean {
+        if let Some(v) = stats.iqr_mean {
             out["score_iqr_mean"] = serde_json::json!(v);
         }
         // --observations flag takes priority; fall back to embedded stats from --embed-stats
@@ -1493,41 +1487,53 @@ fn run_audit(args: AuditArgs) -> Result<()> {
         return Ok(());
     }
 
-    let pct = |n: usize| n as f64 / total as f64 * 100.0;
+    let pct = |n: usize| n as f64 / stats.total as f64 * 100.0;
     println!("=== quietset audit ===");
-    println!("total:          {:>8}", total);
-    println!("  keep:         {:>8}  ({:.1}%)", n_keep, pct(n_keep));
-    println!("  review:       {:>8}  ({:.1}%)", n_review, pct(n_review));
-    println!("  drop:         {:>8}  ({:.1}%)", n_drop, pct(n_drop));
-    if has_lcb {
+    println!("total:          {:>8}", stats.total);
+    println!(
+        "  keep:         {:>8}  ({:.1}%)",
+        stats.n_keep,
+        pct(stats.n_keep)
+    );
+    println!(
+        "  review:       {:>8}  ({:.1}%)",
+        stats.n_review,
+        pct(stats.n_review)
+    );
+    println!(
+        "  drop:         {:>8}  ({:.1}%)",
+        stats.n_drop,
+        pct(stats.n_drop)
+    );
+    if stats.has_lcb {
         println!(
             "  lcb_keep_demotions:{:>5}  (stability >= {:.2}, lcb < {:.2})",
-            lcb_keep_demotions, args.keep_threshold, args.keep_threshold
+            stats.lcb_keep_demotions, args.keep_threshold, args.keep_threshold
         );
     }
     println!();
     println!("stability_score:");
-    println!("  mean:         {:>8.4}", smean);
-    println!("  median:       {:>8.4}", smedian);
-    println!("  p10 / p90:    {:.4} / {:.4}", sp10, sp90);
-    if mad_mean.is_some() || iqr_mean.is_some() {
+    println!("  mean:         {:>8.4}", stats.mean);
+    println!("  median:       {:>8.4}", stats.median);
+    println!("  p10 / p90:    {:.4} / {:.4}", stats.p10, stats.p90);
+    if stats.mad_mean.is_some() || stats.iqr_mean.is_some() {
         println!();
         println!("score dispersion (mean across samples):");
-        if let Some(v) = mad_mean {
+        if let Some(v) = stats.mad_mean {
             println!("  mad:          {:>8.4}", v);
         }
-        if let Some(v) = iqr_mean {
+        if let Some(v) = stats.iqr_mean {
             println!("  iqr:          {:>8.4}", v);
         }
     }
-    if !drivers.is_empty() && !unstable.is_empty() {
+    if !stats.drivers.is_empty() && stats.unstable_count > 0 {
         println!();
         println!("top instability drivers:");
-        for (name, count) in drivers.iter().take(6) {
+        for (name, count) in stats.drivers.iter().take(6) {
             println!(
                 "  {:<24} {:.0}%",
                 driver_label(name),
-                *count as f64 / unstable.len() as f64 * 100.0
+                *count as f64 / stats.unstable_count as f64 * 100.0
             );
         }
     }
