@@ -229,6 +229,10 @@ fn percentile_of_sorted(sorted: &[f64], p: f64) -> f64 {
 }
 
 /// Compute a [`StabilityReport`] for one sample from its observations.
+///
+/// See the trust-boundary note on [`score_all`]: `obs` is expected to already be
+/// validated (finite `score`/`budget`, non-empty `sample_id`); this is only checked
+/// via `debug_assert!` here, not enforced in release builds.
 pub fn compute_report(
     sample_id: &str,
     obs: &[Observation],
@@ -238,6 +242,20 @@ pub fn compute_report(
         config.score_scale.is_finite() && config.score_scale > 0.0,
         "score_scale must be positive and finite"
     );
+    for o in obs {
+        debug_assert!(
+            !o.sample_id.trim().is_empty(),
+            "compute_report: empty sample_id (call Observation::validate() before scoring)"
+        );
+        debug_assert!(
+            o.score.is_none_or(f64::is_finite),
+            "compute_report: non-finite score (call Observation::validate() before scoring)"
+        );
+        debug_assert!(
+            o.budget.is_none_or(f64::is_finite),
+            "compute_report: non-finite budget (call Observation::validate() before scoring)"
+        );
+    }
     let n = obs.len();
 
     // --- label stats ---
@@ -552,6 +570,14 @@ where
 }
 
 /// Score all samples and return reports in `sample_id` insertion order.
+///
+/// # Trust boundary
+///
+/// Callers are responsible for validating `observations` (non-empty `sample_id`,
+/// finite `score`/`budget`) before calling this function — [`parse_jsonl`](crate::parse_jsonl)
+/// and [`parse_csv`](crate::parse_csv) already do this via [`Observation::validate`]. Observations
+/// built directly through the Rust API and passed here unvalidated are checked with
+/// `debug_assert!` only (panics in debug builds, silently accepted in release builds).
 pub fn score_all(observations: Vec<Observation>, config: &ScoreConfig) -> Vec<StabilityReport> {
     let groups = crate::group::group_by_sample_id(observations.into_iter());
     groups

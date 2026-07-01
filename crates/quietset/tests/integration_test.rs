@@ -1388,3 +1388,18 @@ fn test_score_dispersion_mad_single_obs_skips_score_consistency() {
     );
     assert_eq!(r.decision, Decision::Review);
 }
+
+// `debug_assert!` compiles out under `--release`, so this test only panics in a debug
+// build (see the trust-boundary note on `score_all`); skip it under release to avoid a
+// false failure when `cargo test --release` is used.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "call Observation::validate() before scoring")]
+fn test_score_all_panics_on_non_finite_score_bypassing_parser() {
+    let obs = vec![Observation {
+        sample_id: "a".into(),
+        score: Some(f64::NAN),
+        ..Default::default()
+    }];
+    let _ = score_all(obs, &ScoreConfig::default());
+}
