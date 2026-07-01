@@ -727,6 +727,31 @@ fn test_score_mad_less_sensitive_to_outlier() {
 }
 
 #[test]
+fn test_score_iqr_even_n_uses_interpolation() {
+    // Scores: 1,2,3,4 (even n). Linear interpolation (NumPy/R default) gives
+    // median=2.5, Q1=1.75, Q3=3.25, IQR=1.5. Nearest-rank rounding would give
+    // median=3, Q1=2, Q3=4, IQR=2 instead.
+    let obs = vec![1.0, 2.0, 3.0, 4.0]
+        .into_iter()
+        .map(|score| quietset::Observation {
+            sample_id: "a".into(),
+            score: Some(score),
+            ..Default::default()
+        })
+        .collect();
+    let config = ScoreConfig {
+        score_dispersion: ScoreDispersion::Iqr,
+        ..ScoreConfig::default()
+    };
+    let reports = score_all(obs, &config);
+    let iqr = reports[0].score_iqr.unwrap();
+    assert!(
+        (iqr - 1.5).abs() < 1e-9,
+        "expected interpolated IQR 1.5, got {iqr}"
+    );
+}
+
+#[test]
 fn test_gold_label_changes_reliability() {
     // e1 matches majority (win is strict majority with 2 win vs 1 loss), e2 doesn't
     // With gold_label=loss on all samples, reliability reverses

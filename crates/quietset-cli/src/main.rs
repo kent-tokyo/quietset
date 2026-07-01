@@ -663,7 +663,20 @@ fn run_score(args: ScoreArgs) -> Result<()> {
                 }
                 obs
             }
-            Format::Csv => parse_csv(raw.as_bytes()).context("parsing CSV")?,
+            Format::Csv => {
+                let mut obs = Vec::new();
+                let mut rdr = csv::Reader::from_reader(raw.as_bytes());
+                for (i, record) in rdr.deserialize::<Observation>().enumerate() {
+                    match record {
+                        Ok(o) => match o.validate(i + 1) {
+                            Ok(()) => obs.push(o),
+                            Err(e) => eprintln!("warning: skipping row {}: {e}", i + 1),
+                        },
+                        Err(e) => eprintln!("warning: skipping row {}: {e}", i + 1),
+                    }
+                }
+                obs
+            }
         }
     } else {
         match args.format {
@@ -1004,15 +1017,21 @@ fn run_summary(args: SummaryArgs) -> Result<()> {
 
 fn run_explain(args: ExplainArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
-    let report: StabilityReport = raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .find_map(|line| {
-            serde_json::from_str::<StabilityReport>(line)
-                .ok()
-                .filter(|r| r.sample_id == args.sample_id)
-        })
-        .ok_or_else(|| anyhow::anyhow!("sample_id '{}' not found", args.sample_id))?;
+    let mut found: Option<StabilityReport> = None;
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.contains("\"_quietset_stats\"") {
+            continue;
+        }
+        let r: StabilityReport =
+            serde_json::from_str(line).with_context(|| format!("parsing line {}", i + 1))?;
+        if r.sample_id == args.sample_id {
+            found = Some(r);
+            break;
+        }
+    }
+    let report =
+        found.ok_or_else(|| anyhow::anyhow!("sample_id '{}' not found", args.sample_id))?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);

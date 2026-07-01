@@ -212,12 +212,20 @@ fn wilson_lcb(successes: usize, trials: usize, confidence_level: f64) -> f64 {
     (num / (1.0 + z2 / n)).clamp(0.0, 1.0)
 }
 
+/// Linear interpolation between order statistics (matches NumPy's/R's default "linear" method).
 fn percentile_of_sorted(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
-    let idx = (p * (sorted.len() - 1) as f64).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
+    let pos = p * (sorted.len() - 1) as f64;
+    let lower = pos.floor() as usize;
+    let upper = pos.ceil() as usize;
+    if lower == upper {
+        sorted[lower]
+    } else {
+        let frac = pos - lower as f64;
+        sorted[lower] + (sorted[upper] - sorted[lower]) * frac
+    }
 }
 
 /// Compute a [`StabilityReport`] for one sample from its observations.
