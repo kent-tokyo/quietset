@@ -123,3 +123,15 @@ fn score_then_filter_pipeline_via_files() {
     let out = run(&["filter", path.to_str().unwrap(), "--decision", "keep"]);
     assert!(out.status.success());
 }
+
+// Regression test for the bug fixed in this session: `filter` had no empty-result
+// guard, so if every input row was invalid and dropped via `--skip-invalid`, it
+// silently produced 0 lines of output with exit code 0 instead of erroring like
+// `summary`/`audit`/`select`/`recommend` already do.
+#[test]
+fn filter_all_invalid_with_skip_invalid_fails_instead_of_silently_succeeding() {
+    let path = write_temp("filter_all_bad.jsonl", "NOT JSON\nALSO NOT JSON\n");
+    let out = run(&["filter", path.to_str().unwrap(), "--skip-invalid"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("no records found"));
+}

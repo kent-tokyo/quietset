@@ -1,6 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use quietset::{parse_jsonl, score_all, ScoreConfig};
+use ::quietset::{parse_jsonl, score_all, ScoreConfig};
 
 /// Score a JSONL string of observations and return a JSONL string of StabilityReports.
 ///

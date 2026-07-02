@@ -1,3 +1,4 @@
 [workspace]
 members = ["crates/quietset", "crates/quietset-cli"]
+exclude = ["crates/quietset-py"]
 resolver = "2"
