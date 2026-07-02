@@ -13,6 +13,21 @@ the full project scope, non-goals, and design principles — read it before prop
 4. Avoid adding heavy dependencies. `unsafe` code is not accepted without a benchmark-backed
    justification.
 
+## Output-format conventions for new commands
+
+quietset's 13 subcommands deliberately don't share one output format (see README's
+["Output formats"](README.md#output-formats) section) — some are built for human inspection,
+some for pipeline composition — but new commands should still fit one of the existing groups
+rather than introduce a 7th convention:
+
+- If the command emits a single result object, add `--json` for a single pretty-printed JSON
+  object, matching `summary`/`explain`/`compare`/`audit`.
+- If the command emits a stream of per-record results, default to JSONL (one object per line),
+  matching `filter`/`select`/`reliability`/`active-review`/`recommend`.
+- Either way, say so explicitly in the flag's `--help` text — don't assume the format is
+  self-evident from the flag name (`policy --json` is JSONL, not a single object, and that
+  surprised even the maintainer; the help text now says so).
+
 ## Development commands
 
 Run these before opening a PR — they match what CI checks:

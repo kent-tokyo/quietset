@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.9.0 — 2026-07-01
+## 0.9.0 — 2026-07-02
 
 ### Changed
 - **BREAKING**: the internal `quietset::metrics` module has been split into `config`, `scoring`,
@@ -14,6 +14,11 @@
   `compute_evaluator_weights`, `compute_weighted_majority`, `compute_evaluator_reliability`)
   remain available unchanged at the crate root (e.g. `quietset::score_all`). Only code importing
   via the internal `quietset::metrics::*` path directly needs to update.
+- `score_all`/`compute_report`/`StreamingScorer` now assert (`debug_assert!`, debug builds only)
+  that observations have a non-empty `sample_id` and finite `score`/`budget` before scoring.
+  Callers going through `parse_jsonl`/`parse_csv` are unaffected (already validated); callers
+  constructing `Observation`s directly and passing unvalidated data may see a new panic in debug
+  builds where previously the bad data would have silently propagated. No change in `--release`.
 - CLI `--help` text clarified for `score --output-format` and `policy --json` to document their
   output-format conventions (see the new README "Output formats" section for the full picture
   across all 13 subcommands).
@@ -22,6 +27,9 @@
 - `filter` no longer silently exits 0 with zero output when every input row is invalid and
   dropped via `--skip-invalid`; it now errors with "no records found", matching `summary`,
   `audit`, `select`, and `recommend`.
+- `quietset-py` failed to compile (`cargo check` from within `crates/quietset-py`): the workspace
+  root was missing an `exclude` entry for it, and separately its `#[pymodule] fn quietset` name
+  collided with `use quietset::{...}`. Both fixed.
 
 ## 0.8.0 — 2026-06-28
 
