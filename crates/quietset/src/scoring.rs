@@ -58,6 +58,18 @@ pub fn compute_report(
     obs: &[Observation],
     config: &ScoreConfig,
 ) -> StabilityReport {
+    compute_report_inner(sample_id, obs, config, None)
+}
+
+/// Same as [`compute_report`] but accepts a pre-computed gold-weighted label confidence,
+/// used only when `config.decision_score == DecisionScore::GoldWeighted` (see
+/// [`crate::score_all_gold_weighted`]). `None` reproduces `compute_report`'s behavior exactly.
+pub(crate) fn compute_report_inner(
+    sample_id: &str,
+    obs: &[Observation],
+    config: &ScoreConfig,
+    gold_weighted_confidence: Option<f64>,
+) -> StabilityReport {
     debug_assert!(
         config.score_scale.is_finite() && config.score_scale > 0.0,
         "score_scale must be positive and finite"
@@ -191,9 +203,12 @@ pub fn compute_report(
         let mut wsum = 0.0_f64;
         let mut wtotal = 0.0_f64;
 
-        // For LCB mode, use label_agreement_lcb as the label component
+        // For LCB mode, use label_agreement_lcb as the label component; for GoldWeighted,
+        // use the externally-computed reliability-weighted confidence (falls back to
+        // label_agreement when none was supplied, e.g. no gold_label anywhere in the batch).
         let label_for_score = match config.decision_score {
             DecisionScore::LowerConfidenceBound => label_agreement_lcb,
+            DecisionScore::GoldWeighted => gold_weighted_confidence.or(label_agreement),
             _ => label_agreement,
         };
 
@@ -239,6 +254,7 @@ pub fn compute_report(
         DecisionScore::Raw => stability_score,
         DecisionScore::Adjusted => adjusted_stability_score,
         DecisionScore::LowerConfidenceBound => stability_score,
+        DecisionScore::GoldWeighted => stability_score,
     };
     let mut decision = decide(base_score, &config.thresholds);
 

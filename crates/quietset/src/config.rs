@@ -22,6 +22,10 @@ pub enum DecisionScore {
     Adjusted,
     /// Use Wilson LCB of label_agreement for label component; confidence-adjusted for score.
     LowerConfidenceBound,
+    /// Use a gold-label-reliability-weighted label vote in place of raw majority agreement.
+    /// Falls back to identical behavior as `Raw` when no `gold_label` is present anywhere in
+    /// the batch (see [`crate::score_all_gold_weighted`]).
+    GoldWeighted,
 }
 
 /// Minimum observation counts required for a Keep decision. Samples not meeting these are demoted to Review.

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added
+- `DecisionScore::GoldWeighted` / `--decision-score gold-weighted` — drives `stability_score`/
+  `decision` from a gold-label-reliability-weighted label vote in place of raw majority
+  agreement. Falls back to identical behavior as `raw` when no `gold_label` is present anywhere
+  in the batch.
+- `score_all_gold_weighted()` — 2-pass function: standard scoring for majority labels → gold-only
+  per-evaluator reliability weights → re-score with the weighted vote baked into
+  `stability_score`; exported from `quietset` crate
+- `calibrate`/`policy` support `--decision-score gold-weighted`, using `weighted_majority_label`
+  (falling back to `majority_label`) for precision/`stable_wrong_rate` when active
+- `compare --policy-after gold-weighted` proxy using `weighted_label_confidence`
+- `compute_evaluator_label_weights()`/`compute_weighted_majority_by_label()` — confusion-matrix
+  refinement of evaluator reliability, weighting per `(evaluator, predicted label)` instead of one
+  scalar per evaluator, now driving `GoldWeighted` (`score_all_weighted`/`--vote weighted`
+  unchanged)
+
+### Fixed
+- `stable-wrong-risk` had no `--decision-score` flag and always graded against the raw
+  `majority_label`, unlike `calibrate`/`policy`. Added `--decision-score`, and it now falls back
+  to `weighted_majority_label` when set, matching the other precision-facing commands.
+
 ## 0.9.0 — 2026-07-02
 
 ### Changed

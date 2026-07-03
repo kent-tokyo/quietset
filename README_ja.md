@@ -314,13 +314,14 @@ quietset score input.jsonl \
 
 ## 判定（decision）
 
-デフォルトでは `stability_score` が判定に使われます。3つのモードがあります。
+デフォルトでは `stability_score` が判定に使われます。4つのモードがあります。
 
 | フラグ | alias | 使用スコア | 特性 |
 |-------|-------|----------|------|
 | `--decision-score raw` *（デフォルト）* | — | `stability_score` | 生の安定性。速いが少数観測の過信リスクあり。 |
 | `--decision-score adjusted` | `--use-adjusted-score` | `adjusted_stability_score` | 証拠量に比例してペナルティ。 |
 | `--decision-score lcb` | `--use-lcb-score` | `label_agreement_lcb`（ラベル部分） | Wilson LCB — 最も保守的。2/2 一致でも LCB ≈ 0.34（95%信頼）になり、証拠なしでは keep にならない。 |
+| `--decision-score gold-weighted` | — | `stability_score`（ラベル部分を信頼性で重み付け） | 生の多数決の代わりに `gold_label` の一致履歴に基づく信頼性重み付き投票を使用。バッチ全体に `gold_label` が一つも無い場合は `raw` と同一の挙動になる。 |
 
 `MinRequirements` はどのモードでも閾値判定の**後に**適用されます。
 

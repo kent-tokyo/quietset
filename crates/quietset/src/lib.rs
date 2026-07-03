@@ -35,7 +35,8 @@ pub use schema::{Decision, StabilityComponents, StabilityReport};
 pub use scoring::{compute_report, score_all};
 pub use stream::StreamingScorer;
 pub use weighting::{
-    compute_evaluator_reliability, compute_evaluator_weights, compute_weighted_majority,
+    compute_evaluator_label_weights, compute_evaluator_reliability, compute_evaluator_weights,
+    compute_weighted_majority, compute_weighted_majority_by_label,
 };
 
 use std::collections::HashMap;
@@ -80,6 +81,47 @@ pub fn score_all_weighted(
                 report.majority_label.as_deref(),
                 &evaluator_weights,
             );
+            report.weighted_majority_label = wml;
+            report.weighted_label_confidence = wlc;
+            report.weighted_label_distribution = wld;
+            report.majority_weighted_conflict = conflict;
+        }
+    }
+    reports
+}
+
+/// Score all samples with the gold-label-reliability-weighted vote driving `stability_score`/
+/// `decision` (2-pass). See [`DecisionScore::GoldWeighted`].
+///
+/// Pass 1: standard scoring to determine majority labels.
+/// Pass 2: build a truth map from `gold_label` only (unlike [`score_all_weighted`], which also
+/// falls back to `majority_label`), compute per-(evaluator, predicted label) reliability weights
+/// from it (see [`compute_evaluator_label_weights`]), then re-score each sample with the
+/// resulting weighted-label confidence baked into `stability_score`/`decision`. When no
+/// `gold_label` is present anywhere in the batch, the truth map is empty and every evaluator
+/// gets the neutral default weight, so the result is identical to [`score_all`] with
+/// `DecisionScore::Raw`.
+pub fn score_all_gold_weighted(
+    observations: Vec<Observation>,
+    config: &ScoreConfig,
+) -> Vec<StabilityReport> {
+    let mut reports = scoring::score_all(observations.clone(), config);
+
+    let truth: HashMap<String, String> = observations
+        .iter()
+        .filter_map(|o| o.gold_label.clone().map(|g| (o.sample_id.clone(), g)))
+        .collect();
+    let label_weights = weighting::compute_evaluator_label_weights(&observations, &truth);
+    let groups = group::group_by_sample_id(observations.into_iter());
+
+    for report in &mut reports {
+        if let Some(obs) = groups.get(&report.sample_id) {
+            let (wml, wlc, wld, conflict) = weighting::compute_weighted_majority_by_label(
+                obs,
+                report.majority_label.as_deref(),
+                &label_weights,
+            );
+            *report = scoring::compute_report_inner(&report.sample_id, obs, config, wlc);
             report.weighted_majority_label = wml;
             report.weighted_label_confidence = wlc;
             report.weighted_label_distribution = wld;

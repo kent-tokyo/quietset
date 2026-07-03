@@ -114,3 +114,24 @@
 - [x] Cargo.toml versions bumped to 0.8.0 (both crates + dependency pin)
 - [x] git commit + push (main branch, 77d7143)
 - [x] Published quietset v0.8.0 and quietset-cli v0.8.0 to crates.io
+
+## Phase 11: Gold-weighted decision score (done)
+
+- [x] `DecisionScore::GoldWeighted` variant + `compute_report`/`compute_report_inner` split
+- [x] `score_all_gold_weighted()` — gold-only truth map, 2-pass reliability-weighted rescoring
+- [x] `score --decision-score gold-weighted` CLI flag; short-circuits `--vote` with a warning on redundant combos
+- [x] `calibrate`/`policy` support `--decision-score gold-weighted`; precision uses `weighted_majority_label`
+- [x] `compare --policy-after gold-weighted` proxy via `weighted_label_confidence`
+- [x] 2 new integration tests (66 total, all passing)
+- [x] README.md / README_ja.md Decisions table + CHANGELOG Unreleased entry
+- [x] cargo fmt + clippy -D warnings clean
+
+## Phase 12: Precision improvements for GoldWeighted (done)
+
+- [x] `stable-wrong-risk` gained `--decision-score` (previously missing entirely) and now falls back to `weighted_majority_label`, matching `calibrate`/`policy`
+- [x] `compute_evaluator_label_weights()` — per-(evaluator, predicted label) confusion-matrix reliability, Laplace-smoothed, no backoff (smoothing alone handles sparse pairs)
+- [x] `compute_weighted_majority_by_label()` — weighted vote keyed by per-label reliability; shared tail logic extracted into `majority_from_weighted_labels`
+- [x] `score_all_gold_weighted()` swapped to per-label weighting; `score_all_weighted`/`--vote weighted` (Phase 9) left untouched
+- [x] 1 new integration test (67 total, all passing) — proves asymmetric per-evaluator reliability is captured
+- [x] CHANGELOG Unreleased Added/Fixed entries
+- [x] cargo fmt + clippy -D warnings clean

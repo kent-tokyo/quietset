@@ -331,13 +331,14 @@ quietset score input.jsonl \
 
 ## Decisions
 
-By default, decisions use `stability_score`. Three decision modes are available:
+By default, decisions use `stability_score`. Four decision modes are available:
 
 | Flag | Alias | Score used | Behaviour |
 |------|-------|-----------|-----------|
 | `--decision-score raw` *(default)* | — | `stability_score` | Raw stability. Fast; can overfit small-n. |
 | `--decision-score adjusted` | `--use-adjusted-score` | `adjusted_stability_score` | Penalises low-evidence samples proportionally. |
 | `--decision-score lcb` | `--use-lcb-score` | `label_agreement_lcb` (label) | Wilson LCB — most conservative. A 2/2 label match gives LCB ≈ 0.34 at 95% confidence, so it will not be kept without more evidence. |
+| `--decision-score gold-weighted` | — | `stability_score` (label component reliability-weighted) | Replaces the raw majority label vote with a `gold_label`-reliability-weighted vote. Falls back to identical behaviour as `raw` when no `gold_label` is present anywhere in the input. |
 
 `MinRequirements` are always applied **after** the threshold comparison.
 

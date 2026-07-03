@@ -11,7 +11,7 @@ use quietset::{
     Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreDispersion,
     ScoreWeights, StabilityReport, Thresholds, compute_calibration, compute_evaluator_reliability,
     compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv, parse_jsonl, score_all,
-    score_all_weighted,
+    score_all_gold_weighted, score_all_weighted,
 };
 
 #[derive(Parser)]
@@ -56,6 +56,7 @@ enum DecisionScoreArg {
     Raw,
     Adjusted,
     Lcb,
+    GoldWeighted,
 }
 
 #[derive(ValueEnum, Clone)]
@@ -128,7 +129,7 @@ struct ScoreArgs {
     #[arg(long, default_value_t = 3.0)]
     confidence_k: f64,
 
-    /// Decision score mode for keep/review/drop: raw (default), adjusted, or lcb.
+    /// Decision score mode for keep/review/drop: raw (default), adjusted, lcb, or gold-weighted.
     /// Overrides --use-adjusted-score and --use-lcb-score when specified.
     #[arg(long, value_enum)]
     decision_score: Option<DecisionScoreArg>,
@@ -418,6 +419,11 @@ struct StableWrongRiskArgs {
     /// Number of stable-wrong samples to list (default 10).
     #[arg(long, default_value_t = 10)]
     top: usize,
+    /// Decision score mode: raw (default), adjusted, lcb, or gold-weighted. Note:
+    /// gold-weighted fits its vote to these same gold labels, so its stable-wrong rate is
+    /// measured in-sample and optimistic; `raw` is the honest safety check.
+    #[arg(long, value_enum)]
+    decision_score: Option<DecisionScoreArg>,
 }
 
 #[derive(clap::Args)]
@@ -445,7 +451,7 @@ struct PolicyArgs {
     input: String,
     #[arg(long)]
     skip_invalid: bool,
-    /// Decision score mode: raw (default), adjusted, or lcb.
+    /// Decision score mode: raw (default), adjusted, lcb, or gold-weighted.
     #[arg(long, value_enum)]
     decision_score: Option<DecisionScoreArg>,
     /// Confidence level for Wilson LCB. Default 0.95.
@@ -729,6 +735,13 @@ fn run_score(args: ScoreArgs) -> Result<()> {
     if args.decision_score.is_some() && (args.use_adjusted_score || args.use_lcb_score) {
         eprintln!("warning: --decision-score overrides --use-adjusted-score / --use-lcb-score");
     }
+    if matches!(args.decision_score, Some(DecisionScoreArg::GoldWeighted))
+        && matches!(args.vote, VoteArg::Weighted)
+    {
+        eprintln!(
+            "warning: --decision-score gold-weighted already computes a weighted vote (gold-only reliability weights); ignoring --vote weighted"
+        );
+    }
     let base_weights = match &args.profile {
         Some(ProfileArg::LlmJudge) => ScoreWeights {
             evaluator_agreement: 2.0,
@@ -790,9 +803,11 @@ fn run_score(args: ScoreArgs) -> Result<()> {
         decision_score: match (&args.decision_score, &profile_decision) {
             (Some(DecisionScoreArg::Lcb), _) => DecisionScore::LowerConfidenceBound,
             (Some(DecisionScoreArg::Adjusted), _) => DecisionScore::Adjusted,
+            (Some(DecisionScoreArg::GoldWeighted), _) => DecisionScore::GoldWeighted,
             (Some(DecisionScoreArg::Raw), _) => DecisionScore::Raw,
             (None, Some(DecisionScoreArg::Lcb)) => DecisionScore::LowerConfidenceBound,
             (None, Some(DecisionScoreArg::Adjusted)) => DecisionScore::Adjusted,
+            (None, Some(DecisionScoreArg::GoldWeighted)) => DecisionScore::GoldWeighted,
             (None, Some(DecisionScoreArg::Raw)) => DecisionScore::Raw,
             (None, _) if args.use_lcb_score => DecisionScore::LowerConfidenceBound,
             (None, _) if args.use_adjusted_score => DecisionScore::Adjusted,
@@ -806,9 +821,10 @@ fn run_score(args: ScoreArgs) -> Result<()> {
         confidence_level: args.confidence_level,
     };
     config.validate().context("invalid configuration")?;
-    let reports = match args.vote {
-        VoteArg::Raw => score_all(observations.clone(), &config),
-        VoteArg::Weighted => score_all_weighted(observations.clone(), &config),
+    let reports = match (&config.decision_score, &args.vote) {
+        (DecisionScore::GoldWeighted, _) => score_all_gold_weighted(observations.clone(), &config),
+        (_, VoteArg::Raw) => score_all(observations.clone(), &config),
+        (_, VoteArg::Weighted) => score_all_weighted(observations.clone(), &config),
     };
 
     if args.estimate_evaluator_reliability {
@@ -1320,6 +1336,9 @@ fn run_compare(args: CompareArgs) -> Result<()> {
             let score = match pol {
                 DecisionScoreArg::Adjusted => r.adjusted_stability_score,
                 DecisionScoreArg::Lcb => r.label_agreement_lcb.unwrap_or(0.0),
+                DecisionScoreArg::GoldWeighted => {
+                    r.weighted_label_confidence.unwrap_or(r.stability_score)
+                }
                 DecisionScoreArg::Raw => r.stability_score,
             };
             if score >= kt {
@@ -1334,6 +1353,7 @@ fn run_compare(args: CompareArgs) -> Result<()> {
             DecisionScoreArg::Raw => "raw",
             DecisionScoreArg::Adjusted => "adjusted",
             DecisionScoreArg::Lcb => "lcb",
+            DecisionScoreArg::GoldWeighted => "gold-weighted",
         };
         let mut pol_matrix = [[0usize; 3]; 3];
         for (_, a) in &pairs {
@@ -1857,14 +1877,25 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
         anyhow::bail!("no gold_label found; stable_wrong_risk requires gold_label on observations");
     }
 
+    let decision_score = match args.decision_score {
+        Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
+        Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
+        Some(DecisionScoreArg::GoldWeighted) => DecisionScore::GoldWeighted,
+        Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
+    };
     let config = ScoreConfig {
         thresholds: Thresholds {
             keep: args.keep_threshold,
             drop: 0.40,
         },
+        decision_score: decision_score.clone(),
         ..ScoreConfig::default()
     };
-    let reports = score_all(observations, &config);
+    let reports = if matches!(decision_score, DecisionScore::GoldWeighted) {
+        score_all_gold_weighted(observations, &config)
+    } else {
+        score_all(observations, &config)
+    };
 
     let n_total = reports.len();
     let n_keep = reports
@@ -1872,12 +1903,17 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
         .filter(|r| r.decision == Decision::Keep)
         .count();
 
+    fn label_of(r: &StabilityReport) -> Option<&str> {
+        r.weighted_majority_label
+            .as_deref()
+            .or(r.majority_label.as_deref())
+    }
+
     let mut stable_wrong: Vec<serde_json::Value> = reports
         .iter()
         .filter(|r| r.decision == Decision::Keep)
         .filter(|r| {
-            r.majority_label
-                .as_deref()
+            label_of(r)
                 .and_then(|m| gold_map.get(&r.sample_id).map(|g| m != g.as_str()))
                 .unwrap_or(false)
         })
@@ -1886,6 +1922,7 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
                 "sample_id": r.sample_id,
                 "stability_score": r.stability_score,
                 "majority_label": r.majority_label,
+                "weighted_majority_label": r.weighted_majority_label,
                 "gold_label": gold_map.get(&r.sample_id),
             })
         })
@@ -1929,6 +1966,7 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
     let decision_score = match args.decision_score {
         Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
         Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
+        Some(DecisionScoreArg::GoldWeighted) => DecisionScore::GoldWeighted,
         Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
     };
 
@@ -2058,6 +2096,7 @@ fn run_policy(args: PolicyArgs) -> Result<()> {
     let decision_score = match args.decision_score {
         Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
         Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
+        Some(DecisionScoreArg::GoldWeighted) => DecisionScore::GoldWeighted,
         Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
     };
 
@@ -2071,7 +2110,11 @@ fn run_policy(args: PolicyArgs) -> Result<()> {
         confidence_level: args.confidence_level,
         ..ScoreConfig::default()
     };
-    let reports = score_all(observations.clone(), &config);
+    let reports = if matches!(decision_score, DecisionScore::GoldWeighted) {
+        score_all_gold_weighted(observations.clone(), &config)
+    } else {
+        score_all(observations.clone(), &config)
+    };
     let n_total = reports.len();
     if n_total == 0 {
         anyhow::bail!("no samples scored");
@@ -2104,19 +2147,23 @@ fn run_policy(args: PolicyArgs) -> Result<()> {
         let coverage = n_keep as f64 / n_total as f64;
 
         let (precision, stable_wrong_rate) = if has_gold && n_keep > 0 {
+            fn label_of(r: &StabilityReport) -> Option<&str> {
+                r.weighted_majority_label
+                    .as_deref()
+                    .or(r.majority_label.as_deref())
+            }
             let matches = kept
                 .iter()
                 .filter(|r| {
                     gold.get(r.sample_id.as_str())
-                        .and_then(|&g| r.majority_label.as_deref().map(|m| m == g))
+                        .and_then(|&g| label_of(r).map(|m| m == g))
                         .unwrap_or(false)
                 })
                 .count();
             let wrong = kept
                 .iter()
                 .filter(|r| {
-                    r.majority_label
-                        .as_deref()
+                    label_of(r)
                         .and_then(|ml| gold.get(r.sample_id.as_str()).map(|&g| ml != g))
                         .unwrap_or(false)
                 })

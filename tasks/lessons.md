@@ -142,3 +142,42 @@ For `--min-label-lcb` and `--min-confidence`: a record missing the field (None) 
 the field is *included* (treated as not exceeding the maximum). This asymmetry matches the
 intuition that "no LCB" is insufficient evidence (exclude), but "no MAD" means no dispersion
 info available (pass through). Document this clearly and keep consistent if adding new filters.
+
+## GoldWeighted needed a private compute_report_inner, not a config knob
+
+`DecisionScore::GoldWeighted` needs a per-sample confidence computed from cross-sample data
+(evaluator reliability), which `compute_report` can't derive internally without breaking its
+public signature. Fix: split it into a thin public wrapper and a private `compute_report_inner(...,
+gold_weighted_confidence: Option<f64>)` that both `compute_report` and the new
+`score_all_gold_weighted` orchestrator call. Also: `score_all_gold_weighted`'s truth map uses
+`gold_label` only — unlike `score_all_weighted`'s gold-or-majority blend, blending here would make
+"no gold anywhere" produce a self-consistency signal instead of the identical-to-`raw` no-op the
+type's doc comment promises. A related trap: `calibrate`/`policy` grade precision against
+`r.majority_label`, which is exactly the label `GoldWeighted` is designed to override — both had
+to switch to `weighted_majority_label.or(majority_label)` or gold-weighted precision numbers would
+silently be computed against the stale raw vote. This trap had a third sibling: `stable-wrong-risk`
+graded against `r.majority_label` alone and had no `--decision-score` flag at all — missed in the
+prior pass because it wasn't grepped alongside `calibrate`/`policy`. Grep all callers of
+`majority_label` when fixing this class of bug, not just the ones already flagged.
+
+`stable-wrong-risk --decision-score gold-weighted` is measured in-sample: the per-evaluator
+weights are fit against the same gold labels the resulting vote is then graded against, so the
+reported stable-wrong rate is optimistic (fitting to gold makes "kept but ≠ gold" shrink by
+construction, not just by genuinely better evaluator-reliability signal). This isn't unique to
+`stable-wrong-risk` — `calibrate`/`policy` have the identical circularity and it's an accepted
+tradeoff there because they're threshold-*finding* tools searching against a gold target. But
+`stable-wrong-risk`'s whole purpose is to be an honest safety check, so gold-weighting it can make
+"0.0 risk" mean "fit its own training data perfectly" rather than "genuinely safe." Don't silently
+ship this without a caveat in the flag's help text — a held-out-gold-split fix is real future work,
+not something to add speculatively now.
+
+## Per-label reliability weighting needed no backoff — smoothing already does the job
+
+Extending `GoldWeighted` from a scalar per-evaluator reliability to per-(evaluator, predicted
+label) reliability (an evaluator can be reliable on one label and unreliable on another) initially
+seemed to need a "back off to the evaluator's overall scalar weight when a specific label has too
+few observations" safety net. It doesn't: `compute_evaluator_weights`'s Laplace-smoothed formula
+`(matches + 0.5) / (total + 1)` already pulls sparse estimates toward neutral 0.5 on its own — a
+scalar-mean backoff would just re-blend across labels, which is exactly what per-label weighting
+exists to avoid. Don't add a second shrinkage layer speculatively; add one later only if empirical
+sparse-pair noise actually shows up.

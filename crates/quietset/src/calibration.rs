@@ -1,6 +1,7 @@
 use crate::config::{DecisionScore, ScoreConfig};
 use crate::observation::Observation;
 use crate::schema::StabilityReport;
+use crate::score_all_gold_weighted;
 use crate::scoring::score_all;
 
 /// Result of threshold calibration against gold labels.
@@ -43,7 +44,11 @@ pub fn compute_calibration(
         confidence_level,
         ..ScoreConfig::default()
     };
-    let reports = score_all(observations.to_vec(), &config);
+    let reports = if matches!(decision_score, DecisionScore::GoldWeighted) {
+        score_all_gold_weighted(observations.to_vec(), &config)
+    } else {
+        score_all(observations.to_vec(), &config)
+    };
     let n_total = reports.len();
     if n_total == 0 {
         return None;
@@ -53,6 +58,7 @@ pub fn compute_calibration(
         DecisionScore::Raw => "raw",
         DecisionScore::Adjusted => "adjusted",
         DecisionScore::LowerConfidenceBound => "lcb",
+        DecisionScore::GoldWeighted => "gold-weighted",
     };
 
     // Try thresholds from 0.99 down to 0.50 — return the loosest that meets target
@@ -78,8 +84,12 @@ pub fn compute_calibration(
         let matches = kept
             .iter()
             .filter(|r| {
+                let label = r
+                    .weighted_majority_label
+                    .as_deref()
+                    .or(r.majority_label.as_deref());
                 gold.get(r.sample_id.as_str())
-                    .and_then(|&g| r.majority_label.as_deref().map(|m| m == g))
+                    .and_then(|&g| label.map(|m| m == g))
                     .unwrap_or(false)
             })
             .count();

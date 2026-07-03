@@ -1,8 +1,9 @@
 use quietset::{
     Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreDispersion,
-    ScoreWeights, Thresholds, compute_calibration, compute_evaluator_reliability,
-    compute_evaluator_weights, compute_fleiss_kappa, compute_krippendorff_alpha, parse_jsonl,
-    score_all, score_all_weighted,
+    ScoreWeights, Thresholds, compute_calibration, compute_evaluator_label_weights,
+    compute_evaluator_reliability, compute_evaluator_weights, compute_fleiss_kappa,
+    compute_krippendorff_alpha, compute_weighted_majority, compute_weighted_majority_by_label,
+    parse_jsonl, score_all, score_all_gold_weighted, score_all_weighted,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -1124,6 +1125,154 @@ fn test_weighted_majority_overrides_majority() {
     // A: (1+0.5)/(1+1)=0.75, B/C: (0+0.5)/(1+1)=0.25 each → win score=0.75, loss=0.50
     assert_eq!(r.weighted_majority_label.as_deref(), Some("win"));
     assert_eq!(r.majority_weighted_conflict, Some(true));
+}
+
+#[test]
+fn test_gold_weighted_flips_review_to_keep() {
+    // Same reliability pattern as test_weighted_majority_overrides_majority (A reliably
+    // right, B/C reliably wrong per gold_label), repeated across 6 samples so A's smoothed
+    // weight (6.5/7) dominates B+C's (0.5/7 each): gold-weighted confidence for "s" ≈
+    // 0.867, clearing the default keep_threshold=0.85, while raw label_agreement stays at
+    // 0.667 (Review). evaluator_agreement is zeroed out: with its default weight it also
+    // reflects this sample's disagreement and would keep the raw and gold-weighted scores
+    // too close together to flip the decision.
+    let mut obs = Vec::new();
+    for id in ["s", "s2", "s3", "s4", "s5", "s6"] {
+        for (eval, label) in [("A", "win"), ("B", "loss"), ("C", "loss")] {
+            obs.push(Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                evaluator_id: Some(eval.into()),
+                gold_label: Some("win".into()),
+                ..Default::default()
+            });
+        }
+    }
+    let weights = ScoreWeights {
+        evaluator_agreement: 0.0,
+        ..ScoreWeights::default()
+    };
+
+    let raw_reports = score_all(
+        obs.clone(),
+        &ScoreConfig {
+            weights: weights.clone(),
+            ..ScoreConfig::default()
+        },
+    );
+    let s_raw = raw_reports.iter().find(|r| r.sample_id == "s").unwrap();
+    assert_eq!(s_raw.decision, Decision::Review);
+
+    let gold_reports = score_all_gold_weighted(
+        obs,
+        &ScoreConfig {
+            weights,
+            decision_score: DecisionScore::GoldWeighted,
+            ..ScoreConfig::default()
+        },
+    );
+    let s_gold = gold_reports.iter().find(|r| r.sample_id == "s").unwrap();
+    assert_eq!(s_gold.weighted_majority_label.as_deref(), Some("win"));
+    assert_eq!(
+        s_gold.decision,
+        Decision::Keep,
+        "gold-weighted stability {} should clear keep_threshold",
+        s_gold.stability_score
+    );
+    assert!(s_gold.stability_score > s_raw.stability_score);
+}
+
+#[test]
+fn test_gold_weighted_falls_back_to_raw_without_gold_labels() {
+    let jsonl = r#"{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"win"}
+{"sample_id":"a","label":"loss"}"#;
+    let raw_reports = score_all(parse_jsonl(jsonl).unwrap(), &ScoreConfig::default());
+    let gold_reports = score_all_gold_weighted(
+        parse_jsonl(jsonl).unwrap(),
+        &ScoreConfig {
+            decision_score: DecisionScore::GoldWeighted,
+            ..ScoreConfig::default()
+        },
+    );
+    assert_eq!(gold_reports[0].decision, raw_reports[0].decision);
+    assert_eq!(
+        gold_reports[0].stability_score,
+        raw_reports[0].stability_score
+    );
+    assert_eq!(
+        gold_reports[0].weighted_majority_label,
+        gold_reports[0].majority_label
+    );
+}
+
+#[test]
+fn test_evaluator_label_weights_reveal_asymmetric_reliability() {
+    // Evaluator D: always correct when saying "win" (3/3), always wrong when saying "loss"
+    // (0/3, true label is "win" every time) — overall scalar accuracy is a middling 0.5,
+    // hiding this asymmetry.
+    let mut obs = Vec::new();
+    for id in ["c1", "c2", "c3"] {
+        obs.push(Observation {
+            sample_id: id.into(),
+            label: Some("win".into()),
+            evaluator_id: Some("D".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        });
+    }
+    for id in ["c4", "c5", "c6"] {
+        obs.push(Observation {
+            sample_id: id.into(),
+            label: Some("loss".into()),
+            evaluator_id: Some("D".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        });
+    }
+    let truth: std::collections::HashMap<String, String> = obs
+        .iter()
+        .filter_map(|o| o.gold_label.clone().map(|g| (o.sample_id.clone(), g)))
+        .collect();
+
+    let scalar = compute_evaluator_weights(&obs, &truth);
+    let w_scalar = *scalar.get("D").unwrap();
+    assert!((w_scalar - 0.5).abs() < 1e-9); // (3+0.5)/(6+1)
+
+    let by_label = compute_evaluator_label_weights(&obs, &truth);
+    let w_win = *by_label.get(&("D".to_string(), "win".to_string())).unwrap();
+    let w_loss = *by_label
+        .get(&("D".to_string(), "loss".to_string()))
+        .unwrap();
+    assert!((w_win - 0.875).abs() < 1e-9); // (3+0.5)/(3+1)
+    assert!((w_loss - 0.125).abs() < 1e-9); // (0+0.5)/(3+1)
+
+    // Target sample: D says "win" (their reliable label); a neutral evaluator (no
+    // evaluator_id, defaults to weight 1.0 in both schemes) says "loss". No gold_label on
+    // this sample — it must not leak into its own reliability calibration above. Compare
+    // scalar vs. per-label confidence in "loss": per-label should be materially lower,
+    // since it discounts D's overall mediocrity for this specific, reliable "win" call.
+    let target = vec![
+        Observation {
+            sample_id: "t".into(),
+            label: Some("win".into()),
+            evaluator_id: Some("D".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "t".into(),
+            label: Some("loss".into()),
+            ..Default::default()
+        },
+    ];
+    let (_, scalar_conf, _, _) = compute_weighted_majority(&target, Some("loss"), &scalar);
+    let (_, label_conf, _, _) =
+        compute_weighted_majority_by_label(&target, Some("loss"), &by_label);
+    // scalar: win=0.5, loss=1.0, total=1.5 -> loss confidence = 1.0/1.5
+    assert!((scalar_conf.unwrap() - (1.0 / 1.5)).abs() < 1e-9);
+    // per-label: win=0.875, loss=1.0, total=1.875 -> loss confidence = 1.0/1.875
+    assert!((label_conf.unwrap() - (1.0 / 1.875)).abs() < 1e-9);
+    assert!(label_conf.unwrap() < scalar_conf.unwrap());
 }
 
 #[test]

@@ -33,6 +33,42 @@ pub fn compute_evaluator_weights(
         .collect()
 }
 
+/// Compute per-(evaluator, predicted label) reliability weights — a confusion-matrix
+/// refinement of [`compute_evaluator_weights`] that captures asymmetric error patterns
+/// (e.g. an evaluator reliably right on "win" but unreliable on "loss", which a single
+/// scalar hides).
+///
+/// `truth` maps `sample_id` → correct label. Weight = smoothed accuracy of this
+/// evaluator's `label` calls: `(matches + 0.5) / (total + 1)`. Pairs not present in
+/// observations get no entry; callers should default to 1.0, same convention as
+/// [`compute_evaluator_weights`].
+pub fn compute_evaluator_label_weights(
+    observations: &[Observation],
+    truth: &HashMap<String, String>,
+) -> HashMap<(String, String), f64> {
+    let mut counts: HashMap<(&str, &str), (usize, usize)> = HashMap::new();
+    for obs in observations {
+        if let (Some(eval_id), Some(label)) = (obs.evaluator_id.as_deref(), obs.label.as_deref())
+            && let Some(true_label) = truth.get(&obs.sample_id)
+        {
+            let entry = counts.entry((eval_id, label)).or_insert((0, 0));
+            entry.1 += 1;
+            if label == true_label.as_str() {
+                entry.0 += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|((id, label), (matches, total))| {
+            (
+                (id.to_string(), label.to_string()),
+                (matches as f64 + 0.5) / (total as f64 + 1.0),
+            )
+        })
+        .collect()
+}
+
 /// Compute reliability-weighted majority label for one sample's observations.
 ///
 /// Returns `(weighted_majority_label, weighted_label_confidence, weighted_label_distribution, majority_weighted_conflict)`.
@@ -62,7 +98,49 @@ pub fn compute_weighted_majority(
             Some((label, w))
         })
         .collect();
+    majority_from_weighted_labels(labeled, majority_label)
+}
 
+/// Same as [`compute_weighted_majority`] but looks up weight per `(evaluator_id, label)`
+/// pair (see [`compute_evaluator_label_weights`]). Missing `evaluator_id`, or a pair with
+/// no weight entry, defaults to 1.0 — same convention as [`compute_weighted_majority`].
+#[allow(clippy::type_complexity)]
+pub fn compute_weighted_majority_by_label(
+    obs: &[Observation],
+    majority_label: Option<&str>,
+    label_weights: &HashMap<(String, String), f64>,
+) -> (
+    Option<String>,
+    Option<f64>,
+    Option<IndexMap<String, f64>>,
+    Option<bool>,
+) {
+    let labeled: Vec<(&str, f64)> = obs
+        .iter()
+        .filter_map(|o| {
+            let label = o.label.as_deref()?;
+            let w = o
+                .evaluator_id
+                .as_deref()
+                .and_then(|id| label_weights.get(&(id.to_string(), label.to_string())))
+                .copied()
+                .unwrap_or(1.0);
+            Some((label, w))
+        })
+        .collect();
+    majority_from_weighted_labels(labeled, majority_label)
+}
+
+#[allow(clippy::type_complexity)]
+fn majority_from_weighted_labels(
+    labeled: Vec<(&str, f64)>,
+    majority_label: Option<&str>,
+) -> (
+    Option<String>,
+    Option<f64>,
+    Option<IndexMap<String, f64>>,
+    Option<bool>,
+) {
     if labeled.is_empty() {
         return (None, None, None, None);
     }
