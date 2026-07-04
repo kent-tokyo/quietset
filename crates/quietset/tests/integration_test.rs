@@ -389,6 +389,7 @@ fn test_all_zero_weights_is_error() {
             seed_stability: 0.0,
             model_agreement: 0.0,
             evaluator_agreement: 0.0,
+            score_sign: 0.0,
         },
         ..ScoreConfig::default()
     };
@@ -427,6 +428,7 @@ fn test_weakest_component_tie_is_deterministic() {
     let c = StabilityComponents {
         label: Some(0.5),
         score_consistency: Some(0.5),
+        score_sign_agreement: None,
         budget_robustness: Some(0.5),
         seed_robustness: Some(0.5),
         model_agreement: Some(0.5),
@@ -812,6 +814,77 @@ fn test_score_sign_agreement() {
 }
 
 #[test]
+fn test_score_sign_weight_zero_by_default_leaves_stability_score_unchanged() {
+    // A sign-flipping-but-magnitude-stable fixture: score_sign_agreement is a low 0.5, but
+    // the default score_sign weight (0.0) must leave stability_score identical to what it
+    // was before this field became weightable.
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            score: Some(0.01),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            score: Some(-0.01),
+            ..Default::default()
+        },
+    ];
+    let r = &score_all(obs, &ScoreConfig::default())[0];
+    assert_eq!(r.score_sign_agreement, Some(0.5));
+    // score_std is tiny here, so score_consistency alone (the only active dimension) should
+    // drive stability_score close to 1.0 -- score_sign_agreement's low 0.5 must not have
+    // pulled it down, since its default weight is 0.0.
+    assert!(
+        r.stability_score > 0.9,
+        "default score_sign weight (0.0) should not affect stability_score, got {}",
+        r.stability_score
+    );
+}
+
+#[test]
+fn test_score_sign_weight_explicit_lowers_stability_score_on_sign_flip() {
+    let sign_flip = vec![
+        Observation {
+            sample_id: "a".into(),
+            score: Some(0.01),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            score: Some(-0.01),
+            ..Default::default()
+        },
+    ];
+    let same_sign = vec![
+        Observation {
+            sample_id: "a".into(),
+            score: Some(0.01),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            score: Some(0.01),
+            ..Default::default()
+        },
+    ];
+    let config = ScoreConfig {
+        weights: ScoreWeights {
+            score_sign: 2.0,
+            ..ScoreWeights::default()
+        },
+        ..ScoreConfig::default()
+    };
+    let flip_score = score_all(sign_flip, &config)[0].stability_score;
+    let same_score = score_all(same_sign, &config)[0].stability_score;
+    assert!(
+        flip_score < same_score,
+        "explicitly weighting score_sign should lower stability_score when scores flip \
+         sign, got flip={flip_score} same={same_score}"
+    );
+}
+
+#[test]
 fn test_gold_label_changes_reliability() {
     // e1 matches majority (win is strict majority with 2 win vs 1 loss), e2 doesn't
     // With gold_label=loss on all samples, reliability reverses
@@ -1025,7 +1098,7 @@ fn test_calibrate_target_precision() {
 
     // e is stable (all "loss") and scores 1.0 just like a/b/c; no threshold can separate it.
     // Best achievable precision: 3 correct / 4 kept (a,b,c,e all score 1.0) = 0.75
-    let result = compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.75, None, 0.40);
+    let result = compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.75, None, 0.40, None);
     assert!(
         result.is_some(),
         "should find a threshold meeting 0.75 precision"
@@ -1058,7 +1131,7 @@ fn test_calibrate_precision_ci_contains_achieved_precision() {
     obs.extend(make("c", "win", "win", 5));
     obs.extend(make("e", "loss", "win", 5)); // stable but wrong
 
-    let result = compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.75, None, 0.40);
+    let result = compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.75, None, 0.40, None);
     let r = result.expect("should find a threshold meeting 0.75 precision");
     assert!(r.precision_ci_low >= 0.0 && r.precision_ci_high <= 1.0);
     assert!(
@@ -1104,9 +1177,9 @@ fn test_calibrate_precision_ci_narrows_with_more_gold_samples() {
         large.extend(make(&format!("e{i}"), "loss", "win", 5));
     }
 
-    let r_small = compute_calibration(&small, &DecisionScore::Raw, 0.95, 0.75, None, 0.40)
+    let r_small = compute_calibration(&small, &DecisionScore::Raw, 0.95, 0.75, None, 0.40, None)
         .expect("small should find a threshold meeting 0.75 precision");
-    let r_large = compute_calibration(&large, &DecisionScore::Raw, 0.95, 0.75, None, 0.40)
+    let r_large = compute_calibration(&large, &DecisionScore::Raw, 0.95, 0.75, None, 0.40, None)
         .expect("large should find a threshold meeting 0.75 precision");
 
     let small_width = r_small.precision_ci_high - r_small.precision_ci_low;
@@ -1131,7 +1204,191 @@ fn test_calibrate_no_gold_returns_none() {
             ..Default::default()
         },
     ];
-    assert!(compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.95, None, 0.40).is_none());
+    assert!(compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.95, None, 0.40, None).is_none());
+}
+
+#[test]
+fn test_calibrate_heldout_precision_differs_from_training() {
+    let make = |id: &str, label: &str, gold: &str, n: usize| -> Vec<Observation> {
+        (0..n)
+            .map(|i| Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                gold_label: Some(gold.into()),
+                evaluator_id: Some(format!("e{i}")),
+                ..Default::default()
+            })
+            .collect()
+    };
+
+    // Training: 9 correct stable samples + 1 wrong stable sample -> 9/10 = 0.90 precision,
+    // all fully agreeing (score 1.0), so the kept set is identical across every threshold.
+    let mut train = Vec::new();
+    for i in 0..9 {
+        train.extend(make(&format!("t{i}"), "win", "win", 5));
+    }
+    train.extend(make("tw", "loss", "win", 5)); // stable but wrong
+
+    // Held-out: same shape (all stable, score 1.0) but only 2/10 correct -> true precision 0.20.
+    let mut heldout = Vec::new();
+    for i in 0..2 {
+        heldout.extend(make(&format!("h{i}"), "win", "win", 5));
+    }
+    for i in 0..8 {
+        heldout.extend(make(&format!("hw{i}"), "loss", "win", 5));
+    }
+
+    let result = compute_calibration(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.80,
+        None,
+        0.40,
+        Some(&heldout),
+    )
+    .expect("training should find a threshold meeting 0.80 precision");
+
+    assert!(
+        (result.keep_threshold - 0.99).abs() < 1e-9,
+        "threshold is selected from training data"
+    );
+    assert_eq!(
+        result.n_total, 10,
+        "n_total should reflect heldout's own size, not training's"
+    );
+    assert_eq!(result.n_keep, 10);
+    assert!(
+        (result.achieved_precision - 0.20).abs() < 1e-9,
+        "achieved_precision should be heldout's true precision (2/10), got {}",
+        result.achieved_precision
+    );
+    assert!(
+        result.achieved_precision < 0.80,
+        "training-selected threshold overfits training data; falling below target on \
+         heldout is the expected, honest signal, not a bug"
+    );
+    let note = result
+        .note
+        .expect("large train/heldout gap should attach a note");
+    assert!(
+        note.contains("0.900") && note.contains("0.200"),
+        "note should name both the in-sample and held-out precision: {note}"
+    );
+}
+
+#[test]
+fn test_calibrate_no_heldout_note_always_present() {
+    let obs: Vec<Observation> = (0..10)
+        .map(|i| Observation {
+            sample_id: format!("s{i}"),
+            label: Some("win".into()),
+            gold_label: Some("win".into()),
+            evaluator_id: Some(format!("e{i}")),
+            ..Default::default()
+        })
+        .collect();
+    let result = compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.75, None, 0.40, None)
+        .expect("all-agreeing gold-correct samples should calibrate");
+    let note = result
+        .note
+        .expect("achieved_precision without --heldout is always in-sample optimistic");
+    assert!(note.contains("--heldout"));
+}
+
+#[test]
+fn test_calibrate_heldout_small_gap_no_note() {
+    let make = |id: &str, label: &str, gold: &str, n: usize| -> Vec<Observation> {
+        (0..n)
+            .map(|i| Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                gold_label: Some(gold.into()),
+                evaluator_id: Some(format!("e{i}")),
+                ..Default::default()
+            })
+            .collect()
+    };
+
+    // Training: 9/10 correct (0.90 precision). Held-out: same 9/10 ratio -> zero gap.
+    let mut train = Vec::new();
+    for i in 0..9 {
+        train.extend(make(&format!("t{i}"), "win", "win", 5));
+    }
+    train.extend(make("tw", "loss", "win", 5));
+
+    let mut heldout = Vec::new();
+    for i in 0..9 {
+        heldout.extend(make(&format!("h{i}"), "win", "win", 5));
+    }
+    heldout.extend(make("hw", "loss", "win", 5));
+
+    let result = compute_calibration(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.80,
+        None,
+        0.40,
+        Some(&heldout),
+    )
+    .expect("training should find a threshold meeting 0.80 precision");
+
+    assert!(
+        (result.achieved_precision - 0.90).abs() < 1e-9,
+        "heldout precision should match training's 9/10 ratio"
+    );
+    assert!(
+        result.note.is_none(),
+        "a zero-gap heldout result should not attach an overfitting note, got {:?}",
+        result.note
+    );
+}
+
+#[test]
+fn test_calibrate_heldout_no_gold_returns_none() {
+    let make = |id: &str, label: &str, gold: &str, n: usize| -> Vec<Observation> {
+        (0..n)
+            .map(|i| Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                gold_label: Some(gold.into()),
+                evaluator_id: Some(format!("e{i}")),
+                ..Default::default()
+            })
+            .collect()
+    };
+    let mut train = Vec::new();
+    train.extend(make("a", "win", "win", 5));
+    train.extend(make("b", "win", "win", 5));
+
+    let heldout = vec![
+        Observation {
+            sample_id: "h".into(),
+            label: Some("win".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "h".into(),
+            label: Some("win".into()),
+            ..Default::default()
+        },
+    ];
+
+    assert!(
+        compute_calibration(
+            &train,
+            &DecisionScore::Raw,
+            0.95,
+            0.75,
+            None,
+            0.40,
+            Some(&heldout)
+        )
+        .is_none(),
+        "heldout with no gold_label should return None, mirroring the \
+         training-gold-missing convention"
+    );
 }
 
 #[test]

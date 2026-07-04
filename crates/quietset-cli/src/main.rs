@@ -8,9 +8,10 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use quietset::{
-    Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreDispersion,
-    ScoreWeights, StabilityReport, Thresholds, compute_calibration, compute_evaluator_reliability,
-    compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv, parse_jsonl, score_all,
+    ActiveReviewCosts, ActiveReviewWeights, Decision, DecisionScore, MinRequirements, Observation,
+    RankBy, ScoreConfig, ScoreDispersion, ScoreWeights, StabilityReport, Thresholds,
+    compute_calibration, compute_evaluator_reliability, compute_fleiss_kappa,
+    compute_krippendorff_alpha, parse_csv, parse_jsonl, rank_active_review, score_all,
     score_all_gold_weighted, score_all_latent_truth, score_all_weighted,
 };
 
@@ -199,6 +200,11 @@ struct ScoreArgs {
     /// Weight for evaluator_agreement in stability_score.
     #[arg(long)]
     weight_evaluators: Option<f64>,
+
+    /// Weight for score_sign_agreement in stability_score (0 = exclude, default —
+    /// informational only unless explicitly weighted).
+    #[arg(long)]
+    weight_score_sign: Option<f64>,
 
     /// Apply a use-case preset. Explicit --weight-* and --decision-score flags override the preset.
     #[arg(long, value_enum)]
@@ -446,6 +452,14 @@ struct CalibrateArgs {
     /// Output a single JSON object (default) or a single CSV row (header + one data row).
     #[arg(long, default_value = "json", value_enum)]
     output_format: CalibrateFormat,
+    /// Path to a held-out gold-labeled observation JSONL. When given, keep_threshold is still
+    /// selected via grid search on the primary input, but achieved_precision/coverage/n_keep/
+    /// n_total/CI are measured independently on this file instead — an honest, non-circular
+    /// estimate (the primary-input measurement is optimistic because the threshold was
+    /// selected against those same labels). Not stdin-capable ('-'); the primary input already
+    /// claims stdin. Must contain gold_label.
+    #[arg(long)]
+    heldout: Option<String>,
 }
 
 #[derive(ValueEnum, Clone)]
@@ -519,6 +533,36 @@ struct ActiveReviewArgs {
     /// Weight for high-seed-sensitivity signal.
     #[arg(long, default_value_t = 1.0)]
     weight_seed_sensitivity: f64,
+    /// Keep threshold used only to compute label_agreement_flip_ratio and the at-risk-keep
+    /// gate for expected_risk_reduction. Does not re-derive `decision`, which is read
+    /// verbatim from the input (whatever thresholds `score` used originally).
+    #[arg(long, default_value_t = 0.85)]
+    keep_threshold: f64,
+    /// Drop threshold used only to compute label_agreement_flip_ratio. Same non-re-deriving
+    /// caveat as --keep-threshold.
+    #[arg(long, default_value_t = 0.40)]
+    drop_threshold: f64,
+    /// Cost of the add_seed action, used in the utility ranking (benefit / cost).
+    #[arg(long, default_value_t = 1.0)]
+    cost_seed: f64,
+    /// Cost of the increase_budget action.
+    #[arg(long, default_value_t = 1.0)]
+    cost_budget: f64,
+    /// Cost of the add_evaluator and add_model actions.
+    #[arg(long, default_value_t = 1.0)]
+    cost_evaluator: f64,
+    /// Cost of the request_gold_label action.
+    #[arg(long, default_value_t = 1.0)]
+    cost_gold_label: f64,
+    /// Sort order: urgency (today's heuristic) or utility (expected benefit / cost).
+    #[arg(long, value_enum, default_value = "urgency")]
+    rank_by: RankByArg,
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+enum RankByArg {
+    Urgency,
+    Utility,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -819,6 +863,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             evaluator_agreement: args
                 .weight_evaluators
                 .unwrap_or(base_weights.evaluator_agreement),
+            score_sign: args.weight_score_sign.unwrap_or(base_weights.score_sign),
         },
         confidence_k: args.confidence_k,
         min_requirements: MinRequirements {
@@ -2022,6 +2067,26 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
         Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
     };
 
+    let heldout = match &args.heldout {
+        Some(path) if path == "-" => {
+            anyhow::bail!("--heldout does not support stdin ('-'); provide a file path")
+        }
+        Some(path) => {
+            let raw = read_input(path)?;
+            let obs = read_observations_jsonl(&raw, args.skip_invalid)?;
+            if obs.is_empty() {
+                anyhow::bail!("no observations found in --heldout file {path}");
+            }
+            if obs.iter().all(|o| o.gold_label.is_none()) {
+                anyhow::bail!(
+                    "--heldout file {path} has no gold_label; a held-out validation set must be gold-labeled"
+                );
+            }
+            Some(obs)
+        }
+        None => None,
+    };
+
     let result = compute_calibration(
         &observations,
         &decision_score,
@@ -2029,28 +2094,34 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
         args.target_precision,
         args.target_coverage,
         args.drop_threshold,
+        heldout.as_deref(),
     )
     .ok_or_else(|| {
         anyhow::anyhow!(
-            "calibration failed: either no gold_label is present in observations, or no \
-         threshold in [0.50, 0.99] meets the target. Try --target-precision with a lower value."
+            "calibration failed: either no gold_label is present in observations (or in \
+         --heldout, if given), or no threshold in [0.50, 0.99] meets the target. Try \
+         --target-precision with a lower value."
         )
     })?;
+
+    let validated_on_heldout = args.heldout.is_some();
 
     match args.output_format {
         CalibrateFormat::Json => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "decision_score":      result.decision_score_name,
-                    "keep_threshold":      result.keep_threshold,
-                    "drop_threshold":      result.drop_threshold,
-                    "achieved_precision":  result.achieved_precision,
-                    "precision_ci_low":    result.precision_ci_low,
-                    "precision_ci_high":   result.precision_ci_high,
-                    "coverage":            result.coverage,
-                    "n_keep":              result.n_keep,
-                    "n_total":             result.n_total,
+                    "decision_score":       result.decision_score_name,
+                    "keep_threshold":       result.keep_threshold,
+                    "drop_threshold":       result.drop_threshold,
+                    "achieved_precision":   result.achieved_precision,
+                    "precision_ci_low":     result.precision_ci_low,
+                    "precision_ci_high":    result.precision_ci_high,
+                    "coverage":             result.coverage,
+                    "n_keep":               result.n_keep,
+                    "n_total":              result.n_total,
+                    "validated_on_heldout": validated_on_heldout,
+                    "note":                 result.note,
                 }))?
             );
         }
@@ -2066,6 +2137,8 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
                 "coverage",
                 "n_keep",
                 "n_total",
+                "validated_on_heldout",
+                "note",
             ])?;
             wtr.write_record([
                 result.decision_score_name.to_string(),
@@ -2077,6 +2150,8 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
                 format!("{:.6}", result.coverage),
                 result.n_keep.to_string(),
                 result.n_total.to_string(),
+                validated_on_heldout.to_string(),
+                result.note.clone().unwrap_or_default(),
             ])?;
             wtr.flush()?;
         }
@@ -2400,122 +2475,76 @@ fn run_active_review(args: ActiveReviewArgs) -> Result<()> {
         anyhow::bail!("no records found");
     }
 
-    struct Entry {
-        urgency: f64,
-        sample_id: String,
-        value: serde_json::Value,
-    }
+    let weights = ActiveReviewWeights {
+        lcb: args.weight_lcb,
+        entropy: args.weight_entropy,
+        score_mad: args.weight_score_mad,
+        budget_sensitivity: args.weight_budget_sensitivity,
+        seed_sensitivity: args.weight_seed_sensitivity,
+    };
+    let costs = ActiveReviewCosts {
+        seed: args.cost_seed,
+        budget: args.cost_budget,
+        evaluator: args.cost_evaluator,
+        gold_label: args.cost_gold_label,
+    };
+    let thresholds = Thresholds {
+        keep: args.keep_threshold,
+        drop: args.drop_threshold,
+    };
+    let rank_by = match args.rank_by {
+        RankByArg::Urgency => RankBy::Urgency,
+        RankByArg::Utility => RankBy::Utility,
+    };
 
-    let mut entries: Vec<Entry> = Vec::new();
-    for r in &reports {
-        if args.unstable_only && r.decision == Decision::Keep {
-            continue;
-        }
-
-        let signals: &[(&'static str, f64, &'static str)] = &[
-            (
-                "low_lcb",
-                r.label_agreement_lcb
-                    .map(|v| (1.0 - v) * args.weight_lcb)
-                    .unwrap_or(0.0),
-                "add_observations",
-            ),
-            (
-                "high_entropy",
-                r.label_entropy
-                    .map(|v| v * args.weight_entropy)
-                    .unwrap_or(0.0),
-                "diversify_evaluators",
-            ),
-            (
-                "high_score_mad",
-                r.score_mad
-                    .map(|v| v.min(1.0) * args.weight_score_mad)
-                    .unwrap_or(0.0),
-                "reduce_score_variance",
-            ),
-            (
-                "high_budget_sensitivity",
-                r.budget_sensitivity
-                    .map(|v| v * args.weight_budget_sensitivity)
-                    .unwrap_or(0.0),
-                "add_budget",
-            ),
-            (
-                "high_seed_sensitivity",
-                r.seed_sensitivity
-                    .map(|v| v * args.weight_seed_sensitivity)
-                    .unwrap_or(0.0),
-                "add_seeds",
-            ),
-        ];
-
-        let total_w: f64 = [
-            r.label_agreement_lcb
-                .map(|_| args.weight_lcb)
-                .unwrap_or(0.0),
-            r.label_entropy.map(|_| args.weight_entropy).unwrap_or(0.0),
-            r.score_mad.map(|_| args.weight_score_mad).unwrap_or(0.0),
-            r.budget_sensitivity
-                .map(|_| args.weight_budget_sensitivity)
-                .unwrap_or(0.0),
-            r.seed_sensitivity
-                .map(|_| args.weight_seed_sensitivity)
-                .unwrap_or(0.0),
-        ]
-        .iter()
-        .sum();
-
-        let raw_sum: f64 = signals.iter().map(|(_, v, _)| v).sum();
-        let urgency = if total_w > 0.0 {
-            raw_sum / total_w
-        } else {
-            0.0
-        };
-
-        let (primary_reason, _, suggested_action) = signals
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap();
-
-        let mut obj = serde_json::Map::new();
-        obj.insert("sample_id".into(), serde_json::json!(r.sample_id));
-        obj.insert("urgency_score".into(), serde_json::json!(urgency));
-        obj.insert("primary_reason".into(), serde_json::json!(primary_reason));
-        obj.insert(
-            "suggested_action".into(),
-            serde_json::json!(suggested_action),
-        );
-        if let Some(v) = r.label_agreement_lcb {
-            obj.insert("label_agreement_lcb".into(), serde_json::json!(v));
-        }
-        if let Some(v) = r.label_entropy {
-            obj.insert("label_entropy".into(), serde_json::json!(v));
-        }
-        if let Some(v) = r.budget_sensitivity {
-            obj.insert("budget_sensitivity".into(), serde_json::json!(v));
-        }
-        if let Some(v) = r.seed_sensitivity {
-            obj.insert("seed_sensitivity".into(), serde_json::json!(v));
-        }
-
-        entries.push(Entry {
-            urgency,
-            sample_id: r.sample_id.clone(),
-            value: serde_json::Value::Object(obj),
-        });
-    }
-
-    entries.sort_by(|a, b| {
-        b.urgency
-            .partial_cmp(&a.urgency)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.sample_id.cmp(&b.sample_id))
-    });
+    let entries = rank_active_review(
+        &reports,
+        &weights,
+        &costs,
+        &thresholds,
+        args.unstable_only,
+        rank_by,
+    );
 
     let take = args.top.unwrap_or(entries.len());
     for e in entries.iter().take(take) {
-        println!("{}", serde_json::to_string(&e.value)?);
+        let mut obj = serde_json::Map::new();
+        obj.insert("sample_id".into(), serde_json::json!(e.sample_id));
+        obj.insert("urgency_score".into(), serde_json::json!(e.urgency_score));
+        obj.insert("primary_reason".into(), serde_json::json!(e.primary_reason));
+        obj.insert(
+            "suggested_action".into(),
+            serde_json::json!(e.suggested_action),
+        );
+        if let Some(v) = e.label_agreement_lcb {
+            obj.insert("label_agreement_lcb".into(), serde_json::json!(v));
+        }
+        if let Some(v) = e.label_entropy {
+            obj.insert("label_entropy".into(), serde_json::json!(v));
+        }
+        if let Some(v) = e.budget_sensitivity {
+            obj.insert("budget_sensitivity".into(), serde_json::json!(v));
+        }
+        if let Some(v) = e.seed_sensitivity {
+            obj.insert("seed_sensitivity".into(), serde_json::json!(v));
+        }
+        if let Some(v) = e.label_agreement_flip_ratio {
+            obj.insert("label_agreement_flip_ratio".into(), serde_json::json!(v));
+        }
+        obj.insert(
+            "expected_coverage_gain".into(),
+            serde_json::json!(e.expected_coverage_gain),
+        );
+        obj.insert(
+            "expected_risk_reduction".into(),
+            serde_json::json!(e.expected_risk_reduction),
+        );
+        obj.insert("cost".into(), serde_json::json!(e.cost));
+        obj.insert("utility".into(), serde_json::json!(e.utility));
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::Value::Object(obj))?
+        );
     }
     Ok(())
 }

@@ -35,6 +35,10 @@ pub struct StabilityComponents {
     /// Score consistency (`1 - normalized_score_std`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_consistency: Option<f64>,
+    /// Fraction of numeric scores sharing the majority sign. Only contributes to
+    /// `stability_score` when `ScoreWeights::score_sign` is set above its default `0.0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_sign_agreement: Option<f64>,
     /// Budget robustness (`1 - budget_sensitivity`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_robustness: Option<f64>,
@@ -59,6 +63,7 @@ impl StabilityComponents {
         let candidates = [
             ("label", self.label),
             ("score_consistency", self.score_consistency),
+            ("score_sign_agreement", self.score_sign_agreement),
             ("budget_robustness", self.budget_robustness),
             ("seed_robustness", self.seed_robustness),
             ("model_agreement", self.model_agreement),
@@ -126,6 +131,36 @@ pub struct StabilityReport {
     /// True when latent_truth_label differs from majority_label. None if not computed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub majority_latent_conflict: Option<bool>,
+    /// Effective number of independent evaluators behind `latent_truth_label`, correcting for
+    /// pairwise-correlated evaluator errors (Kish design effect). Equals the nominal
+    /// qualifying evaluator count when no correlation is detected; always in `(0, n]`.
+    /// Diagnostic of self-consistency only — correlation is measured against EM's own
+    /// converged label, not an external gold label, so it can only detect correlated
+    /// evaluators when other evaluators elsewhere reveal their deviation; it is blind to
+    /// correlated bias that has captured the EM consensus outright. None if not computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluator_effective_n: Option<f64>,
+    /// True when `evaluator_effective_n` is below 70% of the nominal qualifying evaluator
+    /// count for this sample — a "N evaluators agree" reading is really closer to a smaller
+    /// number of independent confirmations. None if not computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlated_evaluator_warning: Option<bool>,
+    /// True if the latent-truth EM loop converged (its `delta` dropped below its epsilon)
+    /// before exhausting its iteration cap. False means the posterior is less certain — the
+    /// loop ran the full cap without settling. Same value for every sample scored by the same
+    /// batch's EM run. None if latent-truth EM did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent_truth_converged: Option<bool>,
+    /// Number of EM iterations actually run for this sample's batch. Same value for every
+    /// sample scored by the same batch's EM run. None if latent-truth EM did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent_truth_iterations: Option<usize>,
+    /// The EM loop's final iteration `delta` (summed absolute change in posteriors). Useful
+    /// alongside `latent_truth_converged` to see how close a non-converged run got to
+    /// settling. Same value for every sample scored by the same batch's EM run. None if
+    /// latent-truth EM did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent_truth_convergence_delta: Option<f64>,
     /// Mean of all numeric scores.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_mean: Option<f64>,

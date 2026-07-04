@@ -13,6 +13,7 @@
 //! assert_eq!(reports[0].decision, quietset::Decision::Keep);
 //! ```
 
+pub mod active_review;
 pub mod agreement;
 pub mod calibration;
 pub mod config;
@@ -26,6 +27,9 @@ pub mod scoring;
 pub mod stream;
 pub mod weighting;
 
+pub use active_review::{
+    ActiveReviewCosts, ActiveReviewEntry, ActiveReviewWeights, RankBy, rank_active_review,
+};
 pub use agreement::{compute_fleiss_kappa, compute_krippendorff_alpha};
 pub use calibration::{CalibrationResult, compute_calibration};
 pub use config::{DecisionScore, MinRequirements, ScoreConfig, ScoreDispersion, ScoreWeights};
@@ -171,6 +175,11 @@ pub fn score_all_latent_truth(
             report.latent_truth_label = Some(estimate.label.clone());
             report.latent_truth_confidence = Some(estimate.confidence);
             report.latent_truth_label_distribution = Some(estimate.distribution.clone());
+            report.evaluator_effective_n = Some(estimate.evaluator_effective_n);
+            report.correlated_evaluator_warning = Some(estimate.correlated_evaluator_warning);
+            report.latent_truth_converged = Some(estimate.converged);
+            report.latent_truth_iterations = Some(estimate.iterations);
+            report.latent_truth_convergence_delta = Some(estimate.convergence_delta);
         }
     }
     reports

@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `calibrate --heldout <path>` — measures `achieved_precision`/`precision_ci_low`/
+  `precision_ci_high`/`coverage`/`n_keep`/`n_total` on a separate held-out gold-labeled file
+  instead of the primary input, fixing the documented in-sample circularity where the
+  threshold was selected and evaluated against the same gold data. `keep_threshold` selection
+  is unchanged (still grid-searched on the primary input); the reported precision can
+  legitimately land below `--target-precision` when the primary-input-selected threshold
+  overfits — that's the honest signal, not a bug. Fully removes the circularity for `raw`/
+  `adjusted`/`lcb`/`latent-truth`; for `gold-weighted`, reliability weights are still fit on
+  the held-out gold they're then graded against, so treat that case as improved but not fully
+  independent. Output gains `validated_on_heldout: bool` (JSON and CSV) disclosing which set
+  the numbers describe.
+- `DecisionScore::LatentTruth` gains two per-sample diagnostics: `evaluator_effective_n`
+  (Kish design effect correcting for pairwise-correlated evaluator errors — an "N evaluators
+  agree" reading can really be closer to a smaller number of independent confirmations) and
+  `correlated_evaluator_warning` (fires when effective_n is below 70% of the nominal
+  qualifying evaluator count). Both are diagnostics of EM's own self-consistency, not an
+  independent correctness check — they detect a correlated block of evaluators only when
+  *other* evaluators reveal its shared deviation; if the block captures the EM consensus
+  outright, no warning fires. Makes the existing `latent_truth_confidence` caveat actionable.
+- `StabilityReport`'s `score_sign_agreement` can now optionally contribute to
+  `stability_score` via `ScoreWeights::score_sign` / `--weight-score-sign <f>` (default `0.0`
+  — stays informational-only unless explicitly weighted, to preserve backward compatibility).
+  Also added to `StabilityComponents` and `weakest()`'s candidates.
+- `DecisionScore::LatentTruth` gains EM convergence diagnostics: `latent_truth_converged`,
+  `latent_truth_iterations`, `latent_truth_convergence_delta`. Previously, an EM run that hit
+  its 20-iteration cap without settling was indistinguishable from one that converged cleanly
+  — both silently returned a posterior. Same value applies to every sample in a batch (EM runs
+  once per batch).
+- `calibrate` output gains `note: Option<String>` (JSON and CSV), a machine-readable version
+  of the existing in-sample-optimism caveat: always present when `--heldout` was not used;
+  present when `--heldout` was used but in-sample precision at the selected threshold exceeded
+  held-out precision by more than 0.05 (likely overfit); `null` otherwise.
+- `active-review` gains expected-value fields turning its urgency heuristic into a ranking that
+  also accounts for payoff and cost: `label_agreement_flip_ratio` (a distance-to-threshold
+  ratio — explicitly **not** a probability, since only `label_agreement`'s sampling uncertainty
+  is modeled), `expected_coverage_gain` (`1/n_total` for non-`keep` samples),
+  `expected_risk_reduction` (`1/n_keep` for at-risk `keep` samples, the same condition
+  `stable-wrong-risk`'s `lcb_keep_demotions` counts), `cost` (from new `--cost-seed`/
+  `--cost-budget`/`--cost-evaluator`/`--cost-gold-label` flags, all default `1.0`), and
+  `utility` (benefit / cost). New `--keep-threshold`/`--drop-threshold` flags feed only these
+  new fields — `decision` is still read verbatim from the input, never re-derived. New
+  `--rank-by urgency|utility` flag (default `urgency`, preserving today's sort order). The
+  urgency/action-selection logic itself is unchanged, promoted byte-for-byte from
+  `quietset-cli` into a new `quietset::active_review` library module
+  (`rank_active_review`/`ActiveReviewEntry`/`ActiveReviewWeights`/`ActiveReviewCosts`/`RankBy`).
+
+### Changed (breaking)
+- `active-review`'s `suggested_action` values are renamed: `add_observations` →
+  `request_gold_label`, `diversify_evaluators` → `add_evaluator`, `reduce_score_variance` →
+  `add_model`, `add_budget` → `increase_budget`, `add_seeds` → `add_seed`. No test pinned the
+  old strings; downstream tooling matching on these values needs updating.
+
 ## 0.11.0 — 2026-07-04
 
 ### Added

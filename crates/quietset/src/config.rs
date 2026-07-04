@@ -79,6 +79,12 @@ pub struct ScoreWeights {
     pub model_agreement: f64,
     /// Weight for `evaluator_agreement`.
     pub evaluator_agreement: f64,
+    /// Weight for `score_sign_agreement`. Defaults to `0.0`, unlike every other weight in
+    /// this struct (which default to `1.0`) — `score_sign_agreement` shipped
+    /// informational-only, so it must stay excluded from `stability_score` by default;
+    /// changing every existing user's score by default would be a silent behavior break.
+    /// Set explicitly (e.g. via `--weight-score-sign`) to opt in.
+    pub score_sign: f64,
 }
 
 impl Default for ScoreWeights {
@@ -90,6 +96,7 @@ impl Default for ScoreWeights {
             seed_stability: 1.0,
             model_agreement: 1.0,
             evaluator_agreement: 1.0,
+            score_sign: 0.0,
         }
     }
 }
@@ -172,6 +179,7 @@ impl ScoreConfig {
             ("seed_stability", w.seed_stability),
             ("model_agreement", w.model_agreement),
             ("evaluator_agreement", w.evaluator_agreement),
+            ("score_sign", w.score_sign),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(crate::error::Error::InvalidWeight { name, value });
@@ -183,6 +191,7 @@ impl ScoreConfig {
             + w.seed_stability
             + w.model_agreement
             + w.evaluator_agreement
+            + w.score_sign
             == 0.0
         {
             return Err(crate::error::Error::AllWeightsZero);

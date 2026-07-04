@@ -190,3 +190,88 @@ cycle; see `tasks/lessons.md` and the CHANGELOG for the reasoning.
 - [x] README.md/README_ja.md Decisions table (5 rows) + diagnostic-fields table updated
 - [x] CHANGELOG Unreleased Added entries
 - [x] cargo fmt + clippy -D warnings clean
+
+## Phase 16: Held-out calibration split, latent-truth correlation diagnostics, score_sign_agreement as optional weight (done)
+
+A second large external review re-proposed the same 14-item roadmap from Phase 15's cycle;
+~80% was re-litigation of already-recorded rejections (see `tasks/lessons.md`). Three items
+were genuinely new or newly-actionable and confirmed via AskUserQuestion; everything else was
+held to the prior rejections, not re-litigated.
+
+- [x] `compute_calibration` gains `heldout: Option<&[Observation]>` — threshold *selection*
+  unchanged (grid-searched on the primary set only); once found, precision/coverage/CI are
+  measured on `heldout` instead when supplied, fixing the in-sample circularity named 3x in
+  `tasks/lessons.md`. `calibrate --heldout <path>` (not stdin-capable); CLI-only
+  `validated_on_heldout` field discloses which set was measured
+- [x] Latent-truth gains `evaluator_effective_n`/`correlated_evaluator_warning` — Kish design
+  effect over a phi-coefficient pairwise evaluator correlation, computed post-hoc from EM's
+  converged posterior (no changes to `em_step` or the EM loop itself)
+- [x] `score_sign_agreement` can now optionally weight into `stability_score`
+  (`ScoreWeights::score_sign`, default `0.0` — the one weight in the struct that doesn't
+  default to `1.0`, deliberately, for backward compatibility); added to `StabilityComponents`
+  and `weakest()`'s tie-break candidates; `config.validate()` extended to cover it
+- [x] 2 new library tests for `--heldout` (anti-circularity proof + no-gold-in-heldout) +
+  1 CLI test column-count update; 7 new `latent_truth.rs` tests (hand-derived exact DEFF
+  arithmetic, correlated-twins detection, the documented blind-spot case, independent-pair
+  computed-not-defaulted phi, single-evaluator trivial case, 3 helper-level unit tests) +
+  1 bench call site updated; 3 new `score_sign_agreement` weighting tests (76 lib tests total)
+- [x] Manual smoke tests: `--heldout` shows a materially different (lower, honest) precision
+  vs. the same file without it; no-gold-in-heldout produces the documented error; correlated
+  twins fixture live-confirms `evaluator_effective_n≈1.8`/`correlated_evaluator_warning=true`
+  matching the hand-derived test exactly; `--weight-score-sign 2.0` measurably lowers
+  `stability_score` on a sign-flipping fixture vs. the same fixture with the default weight
+- [x] README.md/README_ja.md `calibrate` section (`--heldout` example + explanation),
+  Decisions table (latent-truth row), diagnostic-fields table and Components table
+  (`score_sign_agreement`) updated
+- [x] CHANGELOG Unreleased Added entries
+- [x] cargo build --workspace --all-targets + test + clippy -D warnings + fmt clean
+
+## Phase 17: Latent-truth convergence diagnostics, calibrate optimism note, EV-based active-review (done)
+
+A third large external review re-proposed ~80% of the same rejected 14-item roadmap (a 4th
+repeat of the false "README_ja.md is empty" claim — verified 828 lines; a repeat of the
+already-twice-rejected policy-file TOML direction) plus a stale claim about GitHub
+release/tag/crates.io version mismatch (verified all consistent at 0.11.0). Three items were
+genuinely new or newly-actionable, confirmed via AskUserQuestion: latent-truth EM convergence
+diagnostics, a machine-readable calibrate optimism note, and EV-based active-review (the latter
+explicitly *deferred* — not rejected — in Phase 15's cycle, promoted to build now on explicit
+request, same "deferred has an expiration condition" pattern as Phase 16's held-out split).
+
+- [x] `LatentTruthEstimate`/`StabilityReport` gain `latent_truth_converged`,
+  `latent_truth_iterations`, `latent_truth_convergence_delta` — previously an EM run that hit
+  its 20-iteration cap without settling was indistinguishable from a clean convergence; same
+  value applies to every sample in a batch (EM runs once per batch). 2 new tests empirically
+  verified before locking in (clean fixture converges in 3 iterations; the existing adversarial
+  fixture hits the cap at exactly 20)
+- [x] `calibrate` gains `note: Option<String>` — always present when `--heldout` wasn't used
+  (the existing in-sample-optimism caveat, now machine-readable); present when `--heldout` was
+  used but in-sample precision exceeded held-out precision by >0.05 (likely overfit); `null`
+  when the gap is small. 3 new tests (always-present without heldout, present on a 0.70 gap,
+  absent on a zero gap)
+- [x] EV-based active-review: promoted the existing CLI-only urgency heuristic byte-for-byte
+  into a new `quietset::active_review` library module (`rank_active_review`/
+  `ActiveReviewEntry`/`ActiveReviewWeights`/`ActiveReviewCosts`/`RankBy`), then added
+  `label_agreement_flip_ratio` (a distance-to-threshold ratio, explicitly documented as **not**
+  a probability — only `label_agreement`'s Wilson-CI uncertainty is modeled, since no other
+  `stability_score` component has an uncertainty model in this codebase),
+  `expected_coverage_gain` (`1/n_total` for non-keep samples), `expected_risk_reduction`
+  (`1/n_keep` for at-risk keeps, reusing `stable-wrong-risk`'s existing `lcb_keep_demotions`
+  condition), `cost` (new `--cost-seed`/`--cost-budget`/`--cost-evaluator`/`--cost-gold-label`
+  flags), and `utility` (benefit/cost). New `--keep-threshold`/`--drop-threshold` feed only
+  these new fields, never re-deriving `decision`. New `--rank-by urgency|utility`
+- [x] **Breaking**: `suggested_action` values renamed (`add_observations`→`request_gold_label`,
+  `diversify_evaluators`→`add_evaluator`, `reduce_score_variance`→`add_model`,
+  `add_budget`→`increase_budget`, `add_seeds`→`add_seed`) — confirmed via AskUserQuestion after
+  verifying no test pinned the old strings; documented in CHANGELOG as a breaking change
+- [x] 5 new `active_review.rs` unit tests (2 hand-derived exact utility values, 1 property-style
+  urgency-vs-utility reordering test, 1 no-labels edge case, 1 action-distinctness guard) +
+  1 new CLI smoke test asserting the full new JSON shape and renamed action set
+- [x] Manual smoke tests: latent-truth convergence fields show up correctly in `score` output;
+  calibrate `note` empirically matches all three cases (always-present, large-gap, small-gap);
+  active-review `--rank-by urgency` vs `--rank-by utility` empirically flips ranking order on a
+  cheap-fix-at-threshold vs. expensive-fix-off-threshold fixture, matching hand-derived values
+  exactly
+- [x] README.md/README_ja.md `active-review` section rewritten (renamed actions, 5 new fields,
+  new flags) and latent-truth Decisions-table row extended; CHANGELOG Added + Changed(breaking)
+  entries
+- [x] cargo build --workspace --all-targets + test (18+78+11+2) + clippy -D warnings + fmt clean

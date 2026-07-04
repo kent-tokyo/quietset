@@ -196,6 +196,13 @@ picked-and-graded on the same gold). Fix applied: one caveat sentence in the REA
 docs, not a held-out split — that's the same deferred future work noted above, still not worth
 building speculatively.
 
+**Update**: the held-out split is now implemented (`compute_calibration`'s `heldout` param,
+CLI `--heldout <path>`) — named as deferred future work three times in this file, then
+explicitly requested by the user, which is exactly the point a "deferred" label should expire
+and become a candidate to build. The circularity described above still fully applies whenever
+`--heldout` is omitted, which remains the default — this fix doesn't retroactively make the
+in-sample path honest, it just gives users a way to opt into the honest measurement.
+
 ## "Large-scale changes are OK" authorizes scale, not direction
 
 A large external review proposed upgrading quietset into a full "risk-controlled
@@ -257,3 +264,105 @@ when a new variant is silently absorbed by the wildcard. `grep -n "GoldWeighted"
 crates before considering the CLI wiring done, and confirm every hit has a matching new-variant
 line, was what actually caught all of them — the compiler only caught the 5 sites that use
 genuine exhaustive matching.
+
+## A repeat external review that's ~80% re-litigation is a signal, not just noise to filter
+
+A second large review re-proposed nearly the same 14-item roadmap as the first (same rejected
+`DecisionPolicy` trait, policy-file TOML, adapters crate, redundant score signals), and repeated
+the exact same false "README_ja.md is empty" claim for a *third* time (it's 793 lines). Rather
+than re-deriving the AGENTS.md-non-goals argument from scratch again, citing the prior rejection
+reasoning directly (this file, the CHANGELOG) was both faster and more consistent — the
+reasoning didn't get weaker for being repeated back. The one thing that *did* change: a
+deferred item (held-out calibration split, named 3x here) became a build candidate the moment
+the user asked for it explicitly by name — "deferred" is a label with an expiration condition
+(explicit request), not a permanent rejection, and it's worth checking on every re-proposal
+whether that condition has now been met for any specific item, rather than reflexively holding
+the line on everything just because most of the list is repeat noise.
+
+## Diagnostic helper functions taking already-converged state are directly unit-testable
+
+`evaluator_effective_n_diagnostics(j, samples, pi)` takes the EM's converged posterior as a
+plain parameter rather than computing it internally — this meant the "hand-derive an exact
+DEFF/effective_n value" test could construct `samples`/`pi` directly and call the function in
+isolation, without needing to actually run EM to convergence (which has no closed form) or
+solve a combinatorial joint-contingency-table system to hit a specific target correlation
+through realistic data. Same principle as `em_step` in the lesson above, one level up: keep
+diagnostic/post-processing passes as pure functions over already-computed state, not fused into
+the loop that produces that state, and exact-value tests become tractable instead of requiring
+either a closed-form derivation or elaborate synthetic-data engineering.
+
+## One weight defaulting to 0 instead of 1 needs a deliberate, documented asymmetry
+
+`ScoreWeights::score_sign` had to default to `0.0` while every other field in that struct
+defaults to `1.0`, because `score_sign_agreement` shipped informational-only last cycle —
+defaulting it to `1.0` like its siblings would have silently changed `stability_score` for
+every existing user with numeric scores, the exact kind of default-changes-existing-behavior
+break this project avoids elsewhere. The asymmetry needed its own doc-comment sentence
+explaining *why* it's the one exception, since without that, a future reader (or Claude) fixing
+apparent "inconsistency" would be tempted to make it match the other five and reintroduce the
+break. `config.validate()` also needed the new field added to its explicit finite/non-negative
+and all-zero checks — it enumerates weight fields by name rather than iterating the struct, so
+adding a field to `ScoreWeights` doesn't automatically extend validation; grep for the struct's
+existing field names in `config.rs` when adding a new one, the same class of trap as the
+`DecisionScore` wildcard-match issue above but for struct fields instead of enum variants.
+
+## A subagent's premise should be verified, not trusted, even mid-design
+
+When asked to design EV-based active-review, the design subagent was told (by me) that
+`active-review`'s output shape was pinned by a CLI test — a plausible-sounding claim I hadn't
+actually checked. The subagent grepped `crates/quietset-cli/tests/cli.rs` before proceeding and
+found zero references to `active_review`/`urgency`; the only two matching tests live in
+`integration_test.rs` and never touch the CLI or JSON field names at all. This flipped the
+backward-compat decision (a plain in-place rename became viable, since nothing pins the old
+strings) and is exactly the kind of claim-about-repo-state that needs verifying against HEAD
+rather than accepted from the person asking — the same discipline this file already established
+for external reviews' README_ja.md-emptiness claims, just applied to a claim I made myself.
+
+## Ranking scores that multiply an honest-but-uncalibrated ratio into "expected value" need the multiplication kept at the ranking stage, not baked into the benefit fields
+
+`active-review`'s `expected_coverage_gain`/`expected_risk_reduction` are literal, unconditional
+quantities (`1/n_total`, `1/n_keep`) — `label_agreement_flip_ratio` (the distance-to-threshold
+proxy, explicitly not a probability since only `label_agreement` has a modeled uncertainty in
+this codebase) is multiplied in only at the final `utility` score, not folded into the benefit
+fields themselves. Baking an uncalibrated ratio into a field named "expected_X" would have
+laundered it into false precision; keeping it as a separate ranking multiplier preserves the
+literal, checkable meaning of the benefit fields while still using the ratio for what it's
+actually good for — ordering, not point estimation.
+
+## Hand-derived test fixtures for multi-component `stability_score` need to check which components actually apply, not just the ones you're thinking about
+
+Building `active_review.rs`'s exact-value tests, a fixture with `evaluator_id` set on every
+observation pulled in an `evaluator_agreement` component that wasn't part of the hand
+calculation (label + score_consistency only), silently shifting `stability_score` from the
+predicted 0.875 to the actual 0.833 and flipping `decision` from the expected `Keep` to
+`Review`. Any field present on an `Observation` can activate a `StabilityComponents` dimension
+whether or not it's the one under test — when hand-deriving an exact expected value, either
+omit every field not load-bearing for the components you intend to activate, or print the
+actual `StabilityReport` once to confirm which components fired before asserting.
+
+## Hand-built example JSON in docs needs to satisfy the formula it's documenting, not just look plausible
+
+The `active-review` README example was hand-typed with `utility: 0.033` next to `flip_ratio:
+0.42`/`coverage_gain: 0.0`/`risk_reduction: 0.033`/`cost: 1.0` — but the documented formula
+(`flip_ratio * (coverage_gain + risk_reduction) / cost`) computes to `0.0139`, not `0.033`; the
+`flip_ratio` multiply had silently been dropped from the mental arithmetic while assembling the
+number. A reviewer (or a careful reader) checking the example by hand would catch this
+immediately, which defeats the entire point of a cycle about honest, checkable numbers. Advisor
+review caught it; a self-review wouldn't necessarily, since eyeballing "does this look like a
+plausible small number" doesn't verify the actual multiplication. Fix used: paste real output
+from an actual CLI run (already captured for a smoke test) instead of hand-assembling a
+plausible-looking JSON object — the same standard already applied to hand-derived unit test
+values, extended to docs examples.
+
+## A test asserting a hardcoded literal set "maps 1:1" tests the literal, not the mapping
+
+`test_all_five_signals_map_to_distinct_suggested_actions` originally built a `HashSet` from the
+five expected action strings and asserted its length was 5 — this passes unconditionally
+regardless of what `rank_active_review`'s actual `signals` array produces, since the literal
+never touches the function under test. It would stay green even if the real mapping
+regressed (e.g. two signals accidentally sharing an action string, or a signal's action
+silently reverting to its old name). Fixed by building one single-signal-dominant fixture per
+signal (weight 1.0 on it, 0.0 on the rest) and asserting the actual `primary_reason`/
+`suggested_action` pair the function returns. General pattern: a test with no call into the
+code under test is not a regression guard, no matter how reasonable its assertion looks in
+isolation.

@@ -90,7 +90,7 @@ fn bench_calibrate(c: &mut Criterion) {
         });
     }
     c.bench_function("calibrate_500samples_gold_label", |b| {
-        b.iter(|| compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.90, None, 0.40))
+        b.iter(|| compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.90, None, 0.40, None))
     });
 }
 

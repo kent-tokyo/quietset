@@ -255,6 +255,10 @@ pub(crate) fn compute_report_inner(
             wsum += (1.0 - (d / config.score_scale).min(1.0)) * w.score_stability;
             wtotal += w.score_stability;
         }
+        if let Some(sa) = score_sign_agreement {
+            wsum += sa * w.score_sign;
+            wtotal += w.score_sign;
+        }
         if let Some(bs) = budget_sensitivity {
             wsum += (1.0 - bs) * w.budget_stability;
             wtotal += w.budget_stability;
@@ -333,6 +337,7 @@ pub(crate) fn compute_report_inner(
             };
             dv.map(|d| 1.0 - (d / config.score_scale).min(1.0))
         },
+        score_sign_agreement,
         budget_robustness: budget_sensitivity.map(|b| 1.0 - b),
         seed_robustness: seed_sensitivity.map(|s| 1.0 - s),
         model_agreement,
@@ -356,6 +361,11 @@ pub(crate) fn compute_report_inner(
         latent_truth_confidence: None,
         latent_truth_label_distribution: None,
         majority_latent_conflict: None,
+        evaluator_effective_n: None,
+        correlated_evaluator_warning: None,
+        latent_truth_converged: None,
+        latent_truth_iterations: None,
+        latent_truth_convergence_delta: None,
         score_mean,
         score_std,
         score_range,

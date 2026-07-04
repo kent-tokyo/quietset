@@ -165,10 +165,10 @@ fn calibrate_csv_output_has_header_and_one_data_row() {
     let header = lines.next().expect("header row");
     assert_eq!(
         header,
-        "decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total"
+        "decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,validated_on_heldout,note"
     );
     let data = lines.next().expect("one data row");
-    assert_eq!(data.split(',').count(), 9);
+    assert_eq!(data.split(',').count(), 11);
     assert!(lines.next().is_none(), "should be exactly one data row");
 }
 
@@ -189,4 +189,47 @@ fn policy_csv_output_has_header_and_fixed_columns() {
     for row in &data_rows {
         assert_eq!(row.split(',').count(), 6);
     }
+}
+
+#[test]
+fn active_review_output_has_expected_value_fields_and_renamed_actions() {
+    let path = write_temp(
+        "active_review_input.jsonl",
+        "{\"sample_id\":\"a\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"a\",\"label\":\"loss\"}\n",
+    );
+    let scored = run(&["score", path.to_str().unwrap()]);
+    assert!(scored.status.success());
+    let scored_path = write_temp("active_review_scored.jsonl", &stdout(&scored));
+
+    let out = run(&["active-review", scored_path.to_str().unwrap()]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    let line = text.lines().next().expect("one output line");
+    let value: serde_json::Value = serde_json::from_str(line).unwrap();
+
+    for key in [
+        "sample_id",
+        "urgency_score",
+        "primary_reason",
+        "suggested_action",
+        "expected_coverage_gain",
+        "expected_risk_reduction",
+        "cost",
+        "utility",
+    ] {
+        assert!(value.get(key).is_some(), "missing field: {key}");
+    }
+    let action = value["suggested_action"].as_str().unwrap();
+    assert!(
+        [
+            "request_gold_label",
+            "add_evaluator",
+            "add_model",
+            "increase_budget",
+            "add_seed"
+        ]
+        .contains(&action),
+        "suggested_action should use the renamed action set, got {action}"
+    );
 }

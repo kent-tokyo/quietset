@@ -225,6 +225,7 @@ quietsetコマンドにパイプする予定があるなら、`csv`ではなく�
 | `seed_robustness` | `1 - seed_sensitivity`（シード変化への頑健性） |
 | `model_agreement` | モデル間のラベル一致度 |
 | `evaluator_agreement` | 評価者間のラベル一致度 |
+| `score_sign_agreement` | 数値スコアの多数派符号が占める割合 — デフォルトの重みは `0`（除外）。`--weight-score-sign` で有効化できる |
 
 対応するフィールドがない次元（例：ラベルなし、budget なし）は平均から除外されます。
 観測が1件のみのサンプルは `stability_score = 0.5`（デフォルトで `review`）になります。
@@ -238,7 +239,7 @@ quietsetコマンドにパイプする予定があるなら、`csv`ではなく�
 | `label_agreement_lcb` | `label_agreement` の Wilson 信頼区間下限。少数観測の過信を防ぐ保守的な指標。 |
 | `score_mad` | スコアの中央絶対偏差（MAD）。外れ値への耐性が `score_std` より高い。 |
 | `score_iqr` | スコアの四分位範囲（Q3 − Q1）。 |
-| `score_sign_agreement` | 数値スコアの多数派符号（負・0・正）が占める割合。符号付きでゼロ中心のスコア（将棋・チェス系の評価値）向けの、magnitude 系指標（`score_std`/`score_mad`/`score_iqr`）を補完する指標 — `[+0.01, -0.01]` は magnitude だけ見るとほぼ完全に安定に見えるが、符号は五分五分。参考情報のみで `stability_score` には含まれない。 |
+| `score_sign_agreement` | 数値スコアの多数派符号（負・0・正）が占める割合。符号付きでゼロ中心のスコア（将棋・チェス系の評価値）向けの、magnitude 系指標（`score_std`/`score_mad`/`score_iqr`）を補完する指標 — `[+0.01, -0.01]` は magnitude だけ見るとほぼ完全に安定に見えるが、符号は五分五分。常に計算されるが、デフォルトでは `stability_score` から除外される（`--weight-score-sign 0`）。`--weight-score-sign <f>` を渡すと寄与するようになる。 |
 | `budget_slope` | budget 増加に対するスコアの傾き（正 = 上昇収束） |
 | `confidence` | `n / (n + k)` — 証拠量に基づくスコアの信頼度 |
 | `adjusted_stability_score` | `stability * confidence + 0.5 * (1 - confidence)` |
@@ -323,7 +324,7 @@ quietset score input.jsonl \
 | `--decision-score adjusted` | `--use-adjusted-score` | `adjusted_stability_score` | 証拠量に比例してペナルティ。 |
 | `--decision-score lcb` | `--use-lcb-score` | `label_agreement_lcb`（ラベル部分） | Wilson LCB — 最も保守的。2/2 一致でも LCB ≈ 0.34（95%信頼）になり、証拠なしでは keep にならない。 |
 | `--decision-score gold-weighted` | — | `stability_score`（ラベル部分を信頼性で重み付け） | 生の多数決の代わりに `gold_label` の一致履歴に基づく信頼性重み付き投票を使用。バッチ全体に `gold_label` が一つも無い場合は `raw` と同一の挙動になる。 |
-| `--decision-score latent-truth` | — | `stability_score`（ラベル部分をEMで重み付け） | 生の多数決の代わりに Dawid-Skene EM が推定した投票を使用 — `gold_label` なしで、不一致パターンだけから評価者ごとの信頼性を推定する。バッチ全体で評価者またはラベルの種類が2未満の場合は `raw` と同一の挙動になる。出力に `latent_truth_label`、`latent_truth_confidence`、`latent_truth_label_distribution`、`majority_latent_conflict` が追加される。`latent_truth_confidence` はEMが当てはめた事後確率であり、評価者が少ないと 0/1 に張り付きやすく、評価者のバイアスが相関している場合は自信満々に間違うこともある — 正しさの保証ではない。 |
+| `--decision-score latent-truth` | — | `stability_score`（ラベル部分をEMで重み付け） | 生の多数決の代わりに Dawid-Skene EM が推定した投票を使用 — `gold_label` なしで、不一致パターンだけから評価者ごとの信頼性を推定する。バッチ全体で評価者またはラベルの種類が2未満の場合は `raw` と同一の挙動になる。出力に `latent_truth_label`、`latent_truth_confidence`、`latent_truth_label_distribution`、`majority_latent_conflict`、`evaluator_effective_n`、`correlated_evaluator_warning`、`latent_truth_converged`、`latent_truth_iterations`、`latent_truth_convergence_delta` が追加される。`latent_truth_confidence` はEMが当てはめた事後確率であり、評価者が少ないと 0/1 に張り付きやすく、評価者のバイアスが相関している場合は自信満々に間違うこともある — 正しさの保証ではない。`evaluator_effective_n`/`correlated_evaluator_warning` は同じリスク（相関した評価者誤りに対する Kish design effect）を診断するが、*他の*評価者がその相関ブロックの偏りを暴露した場合にしか検出できない — 相関ブロックがEMのconsensusをそのまま乗っ取ってしまった場合は警告は出ない。自己整合性の診断であり、独立した正しさのチェックではない。`latent_truth_converged` は、EMループが収束epsilonに達する前にiteration上限を使い切った場合に false になる（`latent_truth_iterations` が上限に達し、`latent_truth_convergence_delta` は収束epsilonを上回ったまま）— その事後確率は依然として有効だが確信度は低い。バッチ全体でEMは1回だけ実行されるため、同じバッチ内の全サンプルで同じ値になる。 |
 
 `MinRequirements` はどのモードでも閾値判定の**後に**適用されます。
 
@@ -559,7 +560,9 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
   "precision_ci_high": 0.997,
   "coverage": 0.61,
   "n_keep": 610,
-  "n_total": 1000
+  "n_total": 1000,
+  "validated_on_heldout": false,
+  "note": "achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
 }
 ```
 
@@ -571,7 +574,44 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 ので、`n_keep` が小さいときは `achieved_precision` 単体を正確な値として扱わないこと。この区間は
 選ばれた閾値における標本誤差のみをカバーしており、その閾値自体が同じ gold ラベルに対して目標を
 満たすように選ばれた（cherry-pick された）という事実は反映していない — 楽観的な値になる。下限の
-目安として扱い、より保守的に確認したい場合は held-out の gold セットを使うこと。
+目安として扱い、より保守的に確認したい場合は held-out の gold セットを使うこと。`note` はこの注意を
+機械可読にしたもの: `--heldout` を使っていない場合は常に上記のように付与され、`--heldout` を
+使っていても選ばれた閾値での in-sample precision が held-out precision より 0.05 以上高い場合
+（過学習の疑い）に付与される。gap が小さく通常の標本誤差の範囲内なら `null` になる。
+
+その「より保守的な確認」を実際に行うのが `--heldout <path>` です。`keep_threshold` の探索は
+引き続きメインの入力に対して行われますが、`achieved_precision`/`precision_ci_low`/
+`precision_ci_high`/`coverage`/`n_keep`/`n_total` はその閾値のまま held-out ファイル自身の
+`gold_label` で測定し直されます。`raw`/`adjusted`/`lcb`/`latent-truth` ではこれで循環参照が
+完全に解消されます — 閾値選択の循環は無くなり、latent-truth の EM はそもそも gold_label を
+一切使わないため、held-out の gold に対する評価は同じサンプルであっても真に独立した検証に
+なります。`gold-weighted` だけは一段階循環が残ります — 評価者ごとの信頼度重みが held-out
+ファイル自身の `gold_label` から fit され、その同じラベルに対して採点されるため、in-sample の
+数値よりは良い指標ですが完全に独立ではないものとして扱ってください。stdin（`-`）には
+非対応（メイン入力が既に stdin を使うため）。held-out ファイルに `gold_label` が無いとエラーに
+なります。メイン入力側で選ばれた閾値が過学習していれば、報告される precision は
+`--target-precision` を下回ることがありますが、それは正しい・正直なシグナルであり、バグでは
+ありません。出力の `validated_on_heldout` は `--heldout` が使われたかどうかを示すので、保存した
+結果を後で見ても何を測定したものか分かります:
+
+```bash
+quietset calibrate input.jsonl --target-precision 0.95 --heldout heldout_gold.jsonl
+```
+```json
+{
+  "decision_score": "raw",
+  "keep_threshold": 0.99,
+  "drop_threshold": 0.40,
+  "achieved_precision": 0.71,
+  "precision_ci_low": 0.44,
+  "precision_ci_high": 0.89,
+  "coverage": 1.0,
+  "n_keep": 24,
+  "n_total": 24,
+  "validated_on_heldout": true,
+  "note": null
+}
+```
 
 `--output-format csv` でJSONオブジェクトの代わりにヘッダー行1つ＋データ行1つを出力できる:
 
@@ -579,8 +619,8 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 quietset calibrate input.jsonl --target-precision 0.95 --output-format csv
 ```
 ```csv
-decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total
-lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000
+decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,validated_on_heldout,note
+lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
 ```
 
 ## select コマンド
@@ -720,12 +760,44 @@ quietset active-review scored.jsonl --unstable-only --top 20
 ```
 
 ```json
-{"budget_sensitivity":0.62,"label_agreement_lcb":0.095,"label_entropy":1.0,"primary_reason":"high_entropy","sample_id":"b","seed_sensitivity":0.62,"suggested_action":"diversify_evaluators","urgency_score":0.691}
+{"budget_sensitivity":0.625,"cost":1.0,"expected_coverage_gain":1.0,"expected_risk_reduction":0.0,"label_agreement_flip_ratio":0.818,"label_agreement_lcb":0.301,"label_entropy":0.811,"primary_reason":"high_entropy","sample_id":"b","seed_sensitivity":0.075,"suggested_action":"add_evaluator","urgency_score":0.502,"utility":0.818}
 ```
 
 `--unstable-only` は問題のない keep サンプルをスキップします。信号ごとの `--weight-*` フラグ
 （`--weight-lcb`、`--weight-entropy`、`--weight-score-mad`、`--weight-budget-sensitivity`、
 `--weight-seed-sensitivity`）で、レビュー予算に応じて重視する信号を調整できます。
+`suggested_action` は `request_gold_label`、`add_evaluator`、`add_model`、`increase_budget`、
+`add_seed` のいずれかです（以前の `add_observations`/`diversify_evaluators`/
+`reduce_score_variance`/`add_budget`/`add_seeds` からの改名 — 破壊的変更、CHANGELOG参照）。
+
+5つの新しいフィールドが、緊急度ヒューリスティックを期待値ベースのランキングに拡張します:
+
+- `label_agreement_flip_ratio` — `[0.0, 1.0]` の閾値距離比: `--keep-threshold`/
+  `--drop-threshold` ちょうどで `1.0`、そこから離れるほど `label_agreement` 自身の Wilson CI
+  誤差幅に対して相対的に `0.0` へ縮む。**確率ではない** — モデル化されているのは
+  `label_agreement` の標本誤差だけであり、`stability_score` の他の構成要素（スコア分散、
+  budget/seed感度、model/evaluator agreement）にはこのコードベースに不確実性モデルが無いため、
+  それらが実際に `stability_score` を左右している場合はこの比率は粗い近似にすぎない。ラベルが
+  無いサンプルでは `None`。
+- `expected_coverage_gain` — サンプルの `decision`（入力からそのまま読まれ、再計算されない）が
+  `keep` でない場合は `1 / n_total`、そうでなければ `0.0`: このサンプルの判定が `keep` に
+  反転した場合の正確な coverage 変化量。
+- `expected_risk_reduction` — サンプルが `keep` かつ `label_agreement_lcb` が
+  `--keep-threshold` を下回る場合（`stable-wrong-risk` の `lcb_keep_demotions` と同じ
+  「risk のある keep」条件）は `1 / n_keep`、そうでなければ `0.0`。
+- `cost` — `suggested_action` のコスト。`--cost-seed`/`--cost-budget`/`--cost-evaluator`/
+  `--cost-gold-label`（すべてデフォルト `1.0`。`--cost-evaluator` は `add_model` のコストも
+  兼ねる）から。
+- `utility` — `label_agreement_flip_ratio * (expected_coverage_gain + expected_risk_reduction)
+  / cost`。文字通りの期待値ではなくランキングスコア — これで順位付けすること自体は妥当だが
+  （閾値に近く・見返りが大きく・安く直せるものほど上位に来る）、絶対値を較正された期待値として
+  読んではいけない。
+
+`--keep-threshold`/`--drop-threshold`（デフォルトは `score` と同じ `0.85`/`0.40`）は
+`label_agreement_flip_ratio` と at-risk-keep のゲート判定にのみ使われ、`decision` を再計算する
+ものではない。`--rank-by urgency`（デフォルト）は `urgency_score` で、`--rank-by utility` は
+`utility` でソートし、単に不安定に見えるサンプルではなく追加レビューの効果が最も大きいサンプルを
+浮かび上がらせる。
 
 ## Rust API
 
