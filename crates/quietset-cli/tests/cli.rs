@@ -135,3 +135,58 @@ fn filter_all_invalid_with_skip_invalid_fails_instead_of_silently_succeeding() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("no records found"));
 }
+
+fn gold_labeled_fixture() -> std::path::PathBuf {
+    write_temp(
+        "gold_labeled.jsonl",
+        "{\"sample_id\":\"a\",\"label\":\"win\",\"score\":0.9,\"gold_label\":\"win\"}\n\
+         {\"sample_id\":\"a\",\"label\":\"win\",\"score\":0.9,\"gold_label\":\"win\"}\n\
+         {\"sample_id\":\"a\",\"label\":\"win\",\"score\":0.9,\"gold_label\":\"win\"}\n\
+         {\"sample_id\":\"b\",\"label\":\"win\",\"score\":0.9,\"gold_label\":\"win\"}\n\
+         {\"sample_id\":\"b\",\"label\":\"win\",\"score\":0.9,\"gold_label\":\"win\"}\n\
+         {\"sample_id\":\"b\",\"label\":\"win\",\"score\":0.9,\"gold_label\":\"win\"}\n",
+    )
+}
+
+#[test]
+fn calibrate_csv_output_has_header_and_one_data_row() {
+    let path = gold_labeled_fixture();
+    let out = run(&[
+        "calibrate",
+        path.to_str().unwrap(),
+        "--target-precision",
+        "0.9",
+        "--output-format",
+        "csv",
+    ]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    let mut lines = text.lines();
+    let header = lines.next().expect("header row");
+    assert_eq!(
+        header,
+        "decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total"
+    );
+    let data = lines.next().expect("one data row");
+    assert_eq!(data.split(',').count(), 9);
+    assert!(lines.next().is_none(), "should be exactly one data row");
+}
+
+#[test]
+fn policy_csv_output_has_header_and_fixed_columns() {
+    let path = gold_labeled_fixture();
+    let out = run(&["policy", path.to_str().unwrap(), "--output-format", "csv"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    let mut lines = text.lines();
+    let header = lines.next().expect("header row");
+    assert_eq!(
+        header,
+        "threshold,n_keep,coverage,precision,stable_wrong_rate,best"
+    );
+    let data_rows: Vec<&str> = lines.collect();
+    assert_eq!(data_rows.len(), 50, "one row per swept threshold");
+    for row in &data_rows {
+        assert_eq!(row.split(',').count(), 6);
+    }
+}

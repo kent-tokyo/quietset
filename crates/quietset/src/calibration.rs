@@ -2,6 +2,7 @@ use crate::config::{DecisionScore, ScoreConfig};
 use crate::observation::Observation;
 use crate::schema::StabilityReport;
 use crate::score_all_gold_weighted;
+use crate::score_all_latent_truth;
 use crate::scoring::score_all;
 
 /// Result of threshold calibration against gold labels.
@@ -11,6 +12,10 @@ pub struct CalibrationResult {
     pub drop_threshold: f64,
     pub decision_score_name: &'static str,
     pub achieved_precision: f64,
+    /// Wilson score interval around `achieved_precision` at the given `confidence_level`.
+    /// Widens automatically when few gold-labeled samples are kept.
+    pub precision_ci_low: f64,
+    pub precision_ci_high: f64,
     pub coverage: f64,
     pub n_keep: usize,
     pub n_total: usize,
@@ -44,10 +49,10 @@ pub fn compute_calibration(
         confidence_level,
         ..ScoreConfig::default()
     };
-    let reports = if matches!(decision_score, DecisionScore::GoldWeighted) {
-        score_all_gold_weighted(observations.to_vec(), &config)
-    } else {
-        score_all(observations.to_vec(), &config)
+    let reports = match decision_score {
+        DecisionScore::GoldWeighted => score_all_gold_weighted(observations.to_vec(), &config),
+        DecisionScore::LatentTruth => score_all_latent_truth(observations.to_vec(), &config),
+        _ => score_all(observations.to_vec(), &config),
     };
     let n_total = reports.len();
     if n_total == 0 {
@@ -59,6 +64,7 @@ pub fn compute_calibration(
         DecisionScore::Adjusted => "adjusted",
         DecisionScore::LowerConfidenceBound => "lcb",
         DecisionScore::GoldWeighted => "gold-weighted",
+        DecisionScore::LatentTruth => "latent-truth",
     };
 
     // Try thresholds from 0.99 down to 0.50 — return the loosest that meets target
@@ -87,6 +93,7 @@ pub fn compute_calibration(
                 let label = r
                     .weighted_majority_label
                     .as_deref()
+                    .or(r.latent_truth_label.as_deref())
                     .or(r.majority_label.as_deref());
                 gold.get(r.sample_id.as_str())
                     .and_then(|&g| label.map(|m| m == g))
@@ -96,11 +103,15 @@ pub fn compute_calibration(
         let precision = matches as f64 / n_keep as f64;
 
         if precision >= target_precision {
+            let (precision_ci_low, precision_ci_high) =
+                crate::scoring::wilson_ci(matches, n_keep, confidence_level);
             return Some(CalibrationResult {
                 keep_threshold: t,
                 drop_threshold,
                 decision_score_name,
                 achieved_precision: precision,
+                precision_ci_low,
+                precision_ci_high,
                 coverage,
                 n_keep,
                 n_total,

@@ -19,6 +19,7 @@ pub mod config;
 pub mod decision;
 pub mod error;
 pub mod group;
+pub mod latent_truth;
 pub mod observation;
 pub mod schema;
 pub mod scoring;
@@ -30,6 +31,7 @@ pub use calibration::{CalibrationResult, compute_calibration};
 pub use config::{DecisionScore, MinRequirements, ScoreConfig, ScoreDispersion, ScoreWeights};
 pub use decision::Thresholds;
 pub use error::{Error, Result};
+pub use latent_truth::{LatentTruthEstimate, compute_latent_truth};
 pub use observation::{Observation, parse_csv, parse_jsonl};
 pub use schema::{Decision, StabilityComponents, StabilityReport};
 pub use scoring::{compute_report, score_all};
@@ -126,6 +128,49 @@ pub fn score_all_gold_weighted(
             report.weighted_label_confidence = wlc;
             report.weighted_label_distribution = wld;
             report.majority_weighted_conflict = conflict;
+        }
+    }
+    reports
+}
+
+/// Score all samples with the Dawid-Skene EM latent-truth vote driving `stability_score`/
+/// `decision` (2-pass). See [`DecisionScore::LatentTruth`].
+///
+/// Pass 1: standard scoring to determine majority labels. Pass 2: run
+/// [`latent_truth::compute_latent_truth`] over all observations (no `gold_label` involved),
+/// then re-score each sample with the resulting posterior confidence baked into
+/// `stability_score`/`decision`. When EM doesn't run at all (fewer than 2 distinct
+/// evaluators or labels in the batch), every sample is left exactly as [`score_all`] with
+/// `DecisionScore::Raw` produced it.
+pub fn score_all_latent_truth(
+    observations: Vec<Observation>,
+    config: &ScoreConfig,
+) -> Vec<StabilityReport> {
+    let mut reports = scoring::score_all(observations.clone(), config);
+
+    let Some(estimates) = latent_truth::compute_latent_truth(&observations) else {
+        return reports;
+    };
+    let groups = group::group_by_sample_id(observations.into_iter());
+
+    for report in &mut reports {
+        let Some(obs) = groups.get(&report.sample_id) else {
+            continue;
+        };
+        if let Some(estimate) = estimates.get(&report.sample_id) {
+            *report = scoring::compute_report_inner(
+                &report.sample_id,
+                obs,
+                config,
+                Some(estimate.confidence),
+            );
+            report.majority_latent_conflict = report
+                .majority_label
+                .as_deref()
+                .map(|m| m != estimate.label.as_str());
+            report.latent_truth_label = Some(estimate.label.clone());
+            report.latent_truth_confidence = Some(estimate.confidence);
+            report.latent_truth_label_distribution = Some(estimate.distribution.clone());
         }
     }
     reports

@@ -169,18 +169,19 @@ what to expect from each command before scripting against it:
 | `active-review` | JSONL | none | One object per ranked sample |
 | `recommend` | JSONL | `--text` | Only command where JSONL is the default and text is the opt-in |
 | `stable-wrong-risk` | single pretty JSON object | none | |
-| `calibrate` | single pretty JSON object | none | |
+| `calibrate` | single pretty JSON object | `--output-format json\|csv` | `csv` is a single header row + one data row |
 | `summary` | text | `--json` (single pretty object) | |
 | `explain` | text | `--json` (single pretty object) | |
 | `compare` | text | `--json` (single pretty object) | |
 | `audit` | text | `--json` (single pretty object) | |
-| `policy` | text table | `--json` (**JSONL**, one line per swept threshold — not a single object like the four above) | |
+| `policy` | text table | `--output-format text\|json\|csv` (legacy `--json` still works as an alias for `json`) | `json` is JSONL, one line per swept threshold; `csv` has fixed columns (empty cells when no `gold_label`) |
 
-**CSV is a dead end for piping.** `score --output-format csv` exists purely for spreadsheets/BI
-tools. No other quietset command can parse CSV back in (`filter`/`summary`/`explain`/`compare`/
-`audit`/`select`/`recommend`/`active-review` all expect JSONL `StabilityReport`s;
-`stable-wrong-risk`/`calibrate`/`reliability`/`policy` expect JSONL `Observation`s). If you plan
-to pipe `score`'s output into another quietset command, use the default `jsonl`, not `csv`.
+**CSV is a dead end for piping.** `score --output-format csv`, `calibrate --output-format csv`,
+and `policy --output-format csv` exist purely for spreadsheets/BI tools. No other quietset
+command can parse CSV back in (`filter`/`summary`/`explain`/`compare`/`audit`/`select`/
+`recommend`/`active-review` all expect JSONL `StabilityReport`s; `stable-wrong-risk`/`calibrate`/
+`reliability`/`policy` expect JSONL `Observation`s). If you plan to pipe `score`'s output into
+another quietset command, use the default `jsonl`, not `csv`.
 
 ## Input JSONL format
 
@@ -255,6 +256,7 @@ Additional diagnostic fields on `StabilityReport`:
 | `label_agreement_lcb` | Wilson confidence interval lower bound of `label_agreement`. More conservative than raw `label_agreement` — guards against low-n coincidences. |
 | `score_mad` | Median absolute deviation of numeric scores. More robust to outliers than `score_std`. |
 | `score_iqr` | Interquartile range (Q3 − Q1) of numeric scores. |
+| `score_sign_agreement` | Fraction of numeric scores sharing the majority sign (negative / zero / positive). Domain-aware complement to `score_std`/`score_mad`/`score_iqr` for signed, zero-centered scores (chess/shogi-style eval): `[+0.01, -0.01]` reads as near-perfectly stable by magnitude alone but is a coin-flip on sign. Informational only — not part of `stability_score`. |
 | `budget_slope` | Score trend as budget increases (positive = converges upward) |
 | `confidence` | `n / (n + k)` — how much to trust the score given evidence count |
 | `adjusted_stability_score` | `stability * confidence + 0.5 * (1 - confidence)` |
@@ -287,7 +289,7 @@ Apply a use-case preset with `--profile` instead of tuning weights manually. Exp
 |---------|---------------|----------------------|
 | `llm-judge` | evaluator ×2, model ×2 | `lcb` |
 | `simulation` | budget ×2, seed ×2 | `adjusted` |
-| `game-ai` | budget ×2, seed ×2; min-observations 4, min-budgets 2, min-seeds 2 | `lcb` |
+| `game-ai` | budget ×2, seed ×2; min-observations 4, min-budgets 2, min-seeds 2, min-evaluators 2 | `lcb` |
 | `benchmark` | label ×2, evaluator ×1.5 | `raw` |
 
 ```bash
@@ -331,7 +333,7 @@ quietset score input.jsonl \
 
 ## Decisions
 
-By default, decisions use `stability_score`. Four decision modes are available:
+By default, decisions use `stability_score`. Five decision modes are available:
 
 | Flag | Alias | Score used | Behaviour |
 |------|-------|-----------|-----------|
@@ -339,6 +341,7 @@ By default, decisions use `stability_score`. Four decision modes are available:
 | `--decision-score adjusted` | `--use-adjusted-score` | `adjusted_stability_score` | Penalises low-evidence samples proportionally. |
 | `--decision-score lcb` | `--use-lcb-score` | `label_agreement_lcb` (label) | Wilson LCB — most conservative. A 2/2 label match gives LCB ≈ 0.34 at 95% confidence, so it will not be kept without more evidence. |
 | `--decision-score gold-weighted` | — | `stability_score` (label component reliability-weighted) | Replaces the raw majority label vote with a `gold_label`-reliability-weighted vote. Falls back to identical behaviour as `raw` when no `gold_label` is present anywhere in the input. |
+| `--decision-score latent-truth` | — | `stability_score` (label component EM-weighted) | Replaces the raw majority label vote with a Dawid-Skene EM-estimated vote — infers per-evaluator reliability from disagreement patterns alone, no `gold_label` required. Falls back to identical behaviour as `raw` when the input has fewer than 2 distinct evaluators or labels. Adds `latent_truth_label`, `latent_truth_confidence`, `latent_truth_label_distribution`, `majority_latent_conflict` to the output. `latent_truth_confidence` is EM's fitted posterior, which saturates toward 0/1 with only a few evaluators and can be confidently wrong when evaluators are correlated in their bias — it is not a correctness guarantee. |
 
 `MinRequirements` are always applied **after** the threshold comparison.
 
@@ -609,6 +612,8 @@ quietset calibrate input.jsonl --target-precision 0.90 --target-coverage 0.50
   "keep_threshold": 0.91,
   "drop_threshold": 0.40,
   "achieved_precision": 0.982,
+  "precision_ci_low": 0.943,
+  "precision_ci_high": 0.997,
   "coverage": 0.61,
   "n_keep": 610,
   "n_total": 1000
@@ -618,6 +623,24 @@ quietset calibrate input.jsonl --target-precision 0.90 --target-coverage 0.50
 `calibrate` grid-searches `keep_threshold` from 0.99 down to 0.50 (step 0.01) and returns the
 loosest threshold that meets the target. Requires `gold_label` on at least one observation per
 sample. Returns an error if no threshold meets the target (try a lower `--target-precision`).
+
+`precision_ci_low`/`precision_ci_high` is a Wilson score interval around `achieved_precision` at
+`--confidence-level` (the same knob used for the `lcb` decision score) — it widens automatically
+when few gold labels back the estimate, so don't treat `achieved_precision` alone as exact when
+`n_keep` is small. The interval covers sampling noise at the chosen threshold only, not the fact
+that the threshold itself was picked to hit the target on these same gold labels — it is still
+optimistic. Treat it as a lower bar, not the full uncertainty; a held-out gold set is the more
+conservative check.
+
+Use `--output-format csv` for a single header row + one data row instead of a JSON object:
+
+```bash
+quietset calibrate input.jsonl --target-precision 0.95 --output-format csv
+```
+```csv
+decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total
+lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000
+```
 
 > **Note:** calibrate cannot separate stable-correct from stable-wrong samples — if a sample
 > consistently gets the wrong label, its `stability_score` is indistinguishable from a correct
@@ -667,6 +690,7 @@ quietset recommend scored.jsonl --unstable-only   # skip clean keeps
 | `high_seed_sensitivity` | seed_sensitivity > 0.3 → `add_seeds` |
 | `high_budget_sensitivity` | budget_sensitivity > 0.3 → `increase_budget` |
 | `low_model_agreement` | model_agreement < 0.7 → `add_models` |
+| `low_score_consistency` | score_consistency < 0.7 → `reduce_score_variance` |
 
 Each sample emits at most one recommendation (highest priority rule wins).
 
@@ -738,8 +762,21 @@ threshold  n_keep  coverage
 
 With `gold_label` present on observations, the table also gains `precision` and
 `stable_wrong_rate` columns. `--target-precision`/`--target-coverage` mark the loosest
-threshold meeting that target with `←`. `--json` emits one JSONL object per threshold row instead
-of the formatted table.
+threshold meeting that target with `←`. `--output-format json` emits one JSONL object per
+threshold row instead of the formatted table (`--json` still works as an alias; passing both
+warns and `--output-format` wins). `--output-format csv` emits one row per swept threshold with
+fixed columns `threshold,n_keep,coverage,precision,stable_wrong_rate,best` — `precision`/
+`stable_wrong_rate` are empty when no `gold_label` is present, and `best` is `true` only on the
+row matching `--target-precision`/`--target-coverage`:
+
+```bash
+quietset policy input.jsonl --target-precision 0.95 --output-format csv
+```
+```csv
+threshold,n_keep,coverage,precision,stable_wrong_rate,best
+0.99,1,0.500000,1.000000,0.000000,
+0.98,1,0.500000,1.000000,0.000000,true
+```
 
 ## active-review command
 
@@ -802,6 +839,8 @@ if let Some(report) = scorer.flush() { println!("{:?}", report.decision); }
 
 `crates/quietset-py` provides Python bindings via [pyo3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/).
 Status: **alpha / experimental** — the core scoring API is wrapped but the interface may change.
+It is excluded from the Cargo workspace and from CI (`cargo build/test --workspace` never touches
+it); build and test it manually from within `crates/quietset-py`.
 
 ```bash
 cd crates/quietset-py && maturin develop

@@ -181,3 +181,79 @@ few observations" safety net. It doesn't: `compute_evaluator_weights`'s Laplace-
 scalar-mean backoff would just re-blend across labels, which is exactly what per-label weighting
 exists to avoid. Don't add a second shrinkage layer speculatively; add one later only if empirical
 sparse-pair noise actually shows up.
+
+## calibrate's Wilson CI on achieved_precision is the same in-sample circularity, one layer up
+
+`precision_ci_low`/`precision_ci_high` (Wilson interval around `achieved_precision`) correctly
+captures binomial sampling noise *at the winning threshold* — but `compute_calibration` picks that
+threshold by searching 50 candidates and keeping the loosest one whose precision clears the target
+on this same gold-labeled data. The threshold wasn't fixed in advance; it was selected against the
+same labels the CI is then computed from. So the interval is narrower than the true out-of-sample
+uncertainty — it hides selection noise, not just the sampling noise it's built to show. Same root
+cause as the `stable-wrong-risk`/`calibrate`/`policy` circularity above, one abstraction layer up
+(there it's the reliability weights fit-and-graded on the same gold; here it's the threshold
+picked-and-graded on the same gold). Fix applied: one caveat sentence in the README next to the CI
+docs, not a held-out split — that's the same deferred future work noted above, still not worth
+building speculatively.
+
+## "Large-scale changes are OK" authorizes scale, not direction
+
+A large external review proposed upgrading quietset into a full "risk-controlled
+noisy-evaluation engine" (14 items: `DecisionPolicy` trait, policy-file TOML, schema
+versioning, nested output schema, an adapters crate, an EV-based active-review optimizer,
+conformal risk control, Dawid-Skene latent-truth, and 5 "domain-aware" score signals). The user
+said big changes were fine this time — but that permission is about scope, not about changing
+what kind of tool this is. `AGENTS.md`'s non-goals (no full ML framework, no config-DSL
+platform, no domain-specific game engine tool, no Python-first project) were the actual filter:
+they cut the list to 2 items that deepen the existing thesis (noisy repeated evaluation →
+explainable keep/review/drop) without adding a new *kind* of surface. Concretely rejected:
+`DecisionPolicy` trait (the plain enum already extends fine — proved twice now, by
+`GoldWeighted` and then `LatentTruth`), policy-file TOML (a config language for what CLI flags
+already do), schema versioning/nested output (a compat shim for a v2 that doesn't exist),
+adapters crate (squarely the game-engine-tool non-goal). Deferred to their own future cycle:
+EV-based active-review optimizer, full conformal risk control (existing `calibrate`/`policy` +
+Wilson CI already cover most of the value). Also re-confirmed the by-now-familiar failure mode:
+the review claimed README_ja.md was "実質空" (effectively empty) — it was 791 lines, already at
+full parity with README.md from an earlier phase. Don't trust an external review's claims about
+current repo state without diffing against HEAD first, even when its *proposals* are worth
+taking seriously.
+
+## Score-signal metrics: redundancy-check each one before adding any
+
+Of 5 proposed "domain-aware score signal" metrics, only `score_sign_agreement` survived a
+redundancy pass: `score_flip_rate` either restates `1 - score_sign_agreement` or needs an
+input-order concept `Observation` doesn't have; `score_bucket_agreement` needs a "near-zero"
+threshold with no universal default across domains/scales (the same shape of speculative config
+surface as the earlier-rejected bootstrap dependency and backoff mechanism); `budget_convergence_score`
+is fully redundant with the already-shipped `budget_sensitivity` + `budget_slope` pair;
+`rank_stability` needs cross-sample visibility, which is architecturally incompatible with
+`compute_report`'s per-sample-independent computation shape (and squarely the ranking-tool
+non-goal). Lesson: when an external source proposes N similarly-named metrics, check each one
+against existing fields individually — "5 related metrics" from one proposal usually decomposes
+into 1 genuinely new signal plus N-1 restatements or scope creep, not 5 independent asks.
+
+## Dawid-Skene EM: extract the M+E step as a pure function for exact-value testing
+
+Hand-deriving exact EM posteriors after many iterations to convergence is impractical (the
+recursion has no closed form). Instead, `latent_truth.rs` exposes a private `em_step(k, j,
+samples, pi) -> Vec<Vec<f64>>` performing exactly one M-step + E-step, callable in isolation
+from a unit test with a hand-picked starting `pi` — this makes a *single* iteration's arithmetic
+exactly checkable (a 2-evaluator/2-label symmetric case gives exact `0.9`/`0.1` posteriors,
+verified by hand and asserted to `1e-9`), while `compute_latent_truth`'s full convergence loop is
+verified behaviorally instead (via the integration tests: EM actually flips a
+biased-evaluator-corrupted decision, fallback conditions trigger correctly, gold_label is never
+consulted). Don't try to make one test do both jobs — exact-value and behavioral verification
+want different levels of the implementation exposed.
+
+## The `_` / `Some(...)` wildcard trap strikes a third time — grep, don't rely on the compiler
+
+Adding `DecisionScore::LatentTruth` as a 5th enum variant reproduced the exact "GoldWeighted
+needed compute_report_inner split" class of bug from two phases ago: several `main.rs` and
+`calibration.rs` match sites use a `_` or `Some(X) | None` wildcard arm (the `label_for_score`
+match, the `run_score`/`run_stable_wrong_risk`/`run_calibrate`/`run_policy` decision-score
+resolution, the `matches!(..., DecisionScore::GoldWeighted)` if/else dispatches, and the
+`weighted_majority_label.or(majority_label)` fallback chains) — none of these fail to compile
+when a new variant is silently absorbed by the wildcard. `grep -n "GoldWeighted"` across both
+crates before considering the CLI wiring done, and confirm every hit has a matching new-variant
+line, was what actually caught all of them — the compiler only caught the 5 sites that use
+genuine exhaustive matching.

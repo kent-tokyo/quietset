@@ -3,7 +3,7 @@ use quietset::{
     ScoreWeights, Thresholds, compute_calibration, compute_evaluator_label_weights,
     compute_evaluator_reliability, compute_evaluator_weights, compute_fleiss_kappa,
     compute_krippendorff_alpha, compute_weighted_majority, compute_weighted_majority_by_label,
-    parse_jsonl, score_all, score_all_gold_weighted, score_all_weighted,
+    parse_jsonl, score_all, score_all_gold_weighted, score_all_latent_truth, score_all_weighted,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -752,6 +752,65 @@ fn test_score_iqr_even_n_uses_interpolation() {
     );
 }
 
+fn sign_agreement_of(scores: &[f64]) -> Option<f64> {
+    let obs: Vec<Observation> = scores
+        .iter()
+        .map(|&score| Observation {
+            sample_id: "a".into(),
+            score: Some(score),
+            ..Default::default()
+        })
+        .collect();
+    score_all(obs, &ScoreConfig::default())[0].score_sign_agreement
+}
+
+#[test]
+fn test_score_sign_agreement() {
+    // All same sign.
+    assert_eq!(sign_agreement_of(&[0.3, 0.5, 0.2]), Some(1.0));
+
+    // Clear majority, mixed.
+    assert_eq!(sign_agreement_of(&[0.3, -0.1, 0.2, 0.15]), Some(0.75));
+
+    // The discriminating case: score_std reads this as near-perfectly stable, but the sign
+    // flipped from a positive to a negative signal — score_sign_agreement catches it.
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            score: Some(0.01),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            score: Some(-0.01),
+            ..Default::default()
+        },
+    ];
+    let r = &score_all(obs, &ScoreConfig::default())[0];
+    assert!(r.score_std.unwrap() < 0.02, "{:?}", r.score_std);
+    assert_eq!(r.score_sign_agreement, Some(0.5));
+
+    // Zero is its own bucket, not folded into either sign: 3-way tie.
+    assert_eq!(sign_agreement_of(&[0.0, 0.3, -0.3]), Some(1.0 / 3.0));
+
+    // Zero plus a majority.
+    assert_eq!(sign_agreement_of(&[0.0, 0.0, 0.3]), Some(2.0 / 3.0));
+
+    // Single observation.
+    assert_eq!(sign_agreement_of(&[0.42]), Some(1.0));
+
+    // No numeric scores at all.
+    let obs = vec![Observation {
+        sample_id: "a".into(),
+        label: Some("win".into()),
+        ..Default::default()
+    }];
+    assert_eq!(
+        score_all(obs, &ScoreConfig::default())[0].score_sign_agreement,
+        None
+    );
+}
+
 #[test]
 fn test_gold_label_changes_reliability() {
     // e1 matches majority (win is strict majority with 2 win vs 1 loss), e2 doesn't
@@ -978,6 +1037,84 @@ fn test_calibrate_target_precision() {
         r.achieved_precision
     );
     assert!(r.keep_threshold >= 0.50 && r.keep_threshold <= 0.99);
+}
+
+#[test]
+fn test_calibrate_precision_ci_contains_achieved_precision() {
+    let make = |id: &str, label: &str, gold: &str, n: usize| -> Vec<Observation> {
+        (0..n)
+            .map(|i| Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                gold_label: Some(gold.into()),
+                evaluator_id: Some(format!("e{i}")),
+                ..Default::default()
+            })
+            .collect()
+    };
+    let mut obs = Vec::new();
+    obs.extend(make("a", "win", "win", 5));
+    obs.extend(make("b", "win", "win", 5));
+    obs.extend(make("c", "win", "win", 5));
+    obs.extend(make("e", "loss", "win", 5)); // stable but wrong
+
+    let result = compute_calibration(&obs, &DecisionScore::Raw, 0.95, 0.75, None, 0.40);
+    let r = result.expect("should find a threshold meeting 0.75 precision");
+    assert!(r.precision_ci_low >= 0.0 && r.precision_ci_high <= 1.0);
+    assert!(
+        r.precision_ci_low <= r.achieved_precision,
+        "ci_low {} should be <= achieved_precision {}",
+        r.precision_ci_low,
+        r.achieved_precision
+    );
+    assert!(
+        r.achieved_precision <= r.precision_ci_high,
+        "achieved_precision {} should be <= ci_high {}",
+        r.achieved_precision,
+        r.precision_ci_high
+    );
+}
+
+#[test]
+fn test_calibrate_precision_ci_narrows_with_more_gold_samples() {
+    let make = |id: &str, label: &str, gold: &str, n: usize| -> Vec<Observation> {
+        (0..n)
+            .map(|i| Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                gold_label: Some(gold.into()),
+                evaluator_id: Some(format!("e{i}")),
+                ..Default::default()
+            })
+            .collect()
+    };
+    // Small: 3 correct + 1 wrong, all stable (score 1.0) -> n_keep=4
+    let mut small = Vec::new();
+    small.extend(make("a", "win", "win", 5));
+    small.extend(make("b", "win", "win", 5));
+    small.extend(make("c", "win", "win", 5));
+    small.extend(make("e", "loss", "win", 5));
+
+    // Large: same 3:1 correct:wrong ratio repeated 10x with distinct sample_ids -> n_keep=40
+    let mut large = Vec::new();
+    for i in 0..10 {
+        large.extend(make(&format!("a{i}"), "win", "win", 5));
+        large.extend(make(&format!("b{i}"), "win", "win", 5));
+        large.extend(make(&format!("c{i}"), "win", "win", 5));
+        large.extend(make(&format!("e{i}"), "loss", "win", 5));
+    }
+
+    let r_small = compute_calibration(&small, &DecisionScore::Raw, 0.95, 0.75, None, 0.40)
+        .expect("small should find a threshold meeting 0.75 precision");
+    let r_large = compute_calibration(&large, &DecisionScore::Raw, 0.95, 0.75, None, 0.40)
+        .expect("large should find a threshold meeting 0.75 precision");
+
+    let small_width = r_small.precision_ci_high - r_small.precision_ci_low;
+    let large_width = r_large.precision_ci_high - r_large.precision_ci_low;
+    assert!(
+        large_width < small_width,
+        "CI width with more gold samples ({large_width}) should be narrower than with few ({small_width})"
+    );
 }
 
 #[test]
@@ -1276,10 +1413,195 @@ fn test_evaluator_label_weights_reveal_asymmetric_reliability() {
 }
 
 #[test]
+fn test_latent_truth_flips_review_to_keep_via_disagreement() {
+    // 3 reliable evaluators (A, B, C) + 2 systematically-biased ones (X, Y) who report the
+    // *opposite* of the true label on every training sample. Training samples alternate
+    // win/loss (not unanimous) so the correct label still wins the naive 3-vs-2 majority,
+    // letting EM learn A/B/C's reliability from data that already looks right. No
+    // `gold_label` appears anywhere — this is fully unsupervised.
+    let mut obs = Vec::new();
+    let training = [
+        ("t1", "win"),
+        ("t2", "loss"),
+        ("t3", "win"),
+        ("t4", "loss"),
+        ("t5", "win"),
+        ("t6", "loss"),
+    ];
+    for (id, truth) in training {
+        let opposite = if truth == "win" { "loss" } else { "win" };
+        for eval in ["A", "B", "C"] {
+            obs.push(Observation {
+                sample_id: id.into(),
+                label: Some(truth.into()),
+                evaluator_id: Some(eval.into()),
+                ..Default::default()
+            });
+        }
+        for eval in ["X", "Y"] {
+            obs.push(Observation {
+                sample_id: id.into(),
+                label: Some(opposite.into()),
+                evaluator_id: Some(eval.into()),
+                ..Default::default()
+            });
+        }
+    }
+    // Target sample: only A (reliable, says "win") and X, Y (biased, both say "loss") weigh
+    // in. Raw majority is "loss" (2 of 3).
+    for (eval, label) in [("A", "win"), ("X", "loss"), ("Y", "loss")] {
+        obs.push(Observation {
+            sample_id: "s".into(),
+            label: Some(label.into()),
+            evaluator_id: Some(eval.into()),
+            ..Default::default()
+        });
+    }
+    assert!(
+        obs.iter().all(|o| o.gold_label.is_none()),
+        "this test must be fully unsupervised"
+    );
+
+    let weights = ScoreWeights {
+        evaluator_agreement: 0.0,
+        ..ScoreWeights::default()
+    };
+
+    let raw_reports = score_all(
+        obs.clone(),
+        &ScoreConfig {
+            weights: weights.clone(),
+            ..ScoreConfig::default()
+        },
+    );
+    let s_raw = raw_reports.iter().find(|r| r.sample_id == "s").unwrap();
+    assert_eq!(s_raw.majority_label.as_deref(), Some("loss"));
+    assert_eq!(s_raw.decision, Decision::Review);
+
+    let lt_reports = score_all_latent_truth(
+        obs,
+        &ScoreConfig {
+            weights,
+            decision_score: DecisionScore::LatentTruth,
+            ..ScoreConfig::default()
+        },
+    );
+    let s_lt = lt_reports.iter().find(|r| r.sample_id == "s").unwrap();
+    assert_eq!(
+        s_lt.latent_truth_label.as_deref(),
+        Some("win"),
+        "EM should recover the correct label from A's reliability, distribution: {:?}",
+        s_lt.latent_truth_label_distribution
+    );
+    assert_eq!(s_lt.majority_latent_conflict, Some(true));
+    assert_eq!(
+        s_lt.decision,
+        Decision::Keep,
+        "latent-truth stability {} should clear keep_threshold",
+        s_lt.stability_score
+    );
+}
+
+#[test]
+fn test_latent_truth_falls_back_to_raw_with_single_evaluator() {
+    let jsonl = r#"{"sample_id":"a","label":"win","evaluator_id":"only_one"}
+{"sample_id":"a","label":"win","evaluator_id":"only_one"}
+{"sample_id":"a","label":"loss","evaluator_id":"only_one"}"#;
+    let raw_reports = score_all(parse_jsonl(jsonl).unwrap(), &ScoreConfig::default());
+    let lt_reports = score_all_latent_truth(
+        parse_jsonl(jsonl).unwrap(),
+        &ScoreConfig {
+            decision_score: DecisionScore::LatentTruth,
+            ..ScoreConfig::default()
+        },
+    );
+    assert_eq!(lt_reports[0].decision, raw_reports[0].decision);
+    assert_eq!(
+        lt_reports[0].stability_score,
+        raw_reports[0].stability_score
+    );
+    assert_eq!(lt_reports[0].latent_truth_label, None);
+}
+
+#[test]
+fn test_latent_truth_falls_back_to_raw_with_single_label() {
+    let jsonl = r#"{"sample_id":"a","label":"win","evaluator_id":"e1"}
+{"sample_id":"a","label":"win","evaluator_id":"e2"}
+{"sample_id":"b","label":"win","evaluator_id":"e1"}"#;
+    let raw_reports = score_all(parse_jsonl(jsonl).unwrap(), &ScoreConfig::default());
+    let lt_reports = score_all_latent_truth(
+        parse_jsonl(jsonl).unwrap(),
+        &ScoreConfig {
+            decision_score: DecisionScore::LatentTruth,
+            ..ScoreConfig::default()
+        },
+    );
+    for (raw, lt) in raw_reports.iter().zip(lt_reports.iter()) {
+        assert_eq!(lt.decision, raw.decision);
+        assert_eq!(lt.stability_score, raw.stability_score);
+        assert_eq!(lt.latent_truth_label, None);
+    }
+}
+
+#[test]
+fn test_latent_truth_ignores_gold_label() {
+    // Same batch scored with and without a (wrong) gold_label on every observation — output
+    // must be identical either way, since LatentTruth never consults gold_label at all
+    // (locks in the "no semi-supervised init" design decision so it can't silently regress).
+    let mut obs_no_gold = Vec::new();
+    let mut obs_with_wrong_gold = Vec::new();
+    let training = [("t1", "win"), ("t2", "loss"), ("t3", "win"), ("t4", "loss")];
+    for (id, truth) in training {
+        let opposite = if truth == "win" { "loss" } else { "win" };
+        for eval in ["A", "B"] {
+            obs_no_gold.push(Observation {
+                sample_id: id.into(),
+                label: Some(truth.into()),
+                evaluator_id: Some(eval.into()),
+                ..Default::default()
+            });
+            obs_with_wrong_gold.push(Observation {
+                sample_id: id.into(),
+                label: Some(truth.into()),
+                evaluator_id: Some(eval.into()),
+                gold_label: Some(opposite.into()),
+                ..Default::default()
+            });
+        }
+        obs_no_gold.push(Observation {
+            sample_id: id.into(),
+            label: Some(opposite.into()),
+            evaluator_id: Some("X".into()),
+            ..Default::default()
+        });
+        obs_with_wrong_gold.push(Observation {
+            sample_id: id.into(),
+            label: Some(opposite.into()),
+            evaluator_id: Some("X".into()),
+            gold_label: Some(opposite.into()),
+            ..Default::default()
+        });
+    }
+
+    let config = ScoreConfig {
+        decision_score: DecisionScore::LatentTruth,
+        ..ScoreConfig::default()
+    };
+    let no_gold_reports = score_all_latent_truth(obs_no_gold, &config);
+    let wrong_gold_reports = score_all_latent_truth(obs_with_wrong_gold, &config);
+
+    for (a, b) in no_gold_reports.iter().zip(wrong_gold_reports.iter()) {
+        assert_eq!(a.latent_truth_label, b.latent_truth_label);
+        assert_eq!(a.latent_truth_confidence, b.latent_truth_confidence);
+        assert_eq!(a.decision, b.decision);
+    }
+}
+
+#[test]
 fn test_game_ai_profile_uses_lcb_and_stricter_mins() {
     // Verify game-ai profile config values (test the library-level config, not CLI)
-    // In the CLI, game-ai sets: budget_stability×2, seed_stability×2, min_obs=4, min_budgets=2, min_seeds=2, lcb
-    // We replicate that config here directly.
+    // In the CLI, game-ai sets: budget_stability×2, seed_stability×2, min_obs=4, min_budgets=2,
+    // min_seeds=2, min_evaluators=2, lcb. We replicate that config here directly.
     let config = ScoreConfig {
         weights: ScoreWeights {
             budget_stability: 2.0,
@@ -1290,6 +1612,7 @@ fn test_game_ai_profile_uses_lcb_and_stricter_mins() {
             observations: 4,
             budgets: 2,
             seeds: 2,
+            evaluators: 2,
             ..MinRequirements::default()
         },
         decision_score: DecisionScore::LowerConfidenceBound,

@@ -11,7 +11,7 @@ use quietset::{
     Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreDispersion,
     ScoreWeights, StabilityReport, Thresholds, compute_calibration, compute_evaluator_reliability,
     compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv, parse_jsonl, score_all,
-    score_all_gold_weighted, score_all_weighted,
+    score_all_gold_weighted, score_all_latent_truth, score_all_weighted,
 };
 
 #[derive(Parser)]
@@ -57,6 +57,7 @@ enum DecisionScoreArg {
     Adjusted,
     Lcb,
     GoldWeighted,
+    LatentTruth,
 }
 
 #[derive(ValueEnum, Clone)]
@@ -65,7 +66,7 @@ enum ProfileArg {
     LlmJudge,
     /// Simulation: weight budget and seed robustness 2×; default decision-score adjusted.
     Simulation,
-    /// Game/search AI: weight budget 2×, seed 2×; default decision-score lcb; min-observations 4, min-budgets 2, min-seeds 2.
+    /// Game/search AI: weight budget 2×, seed 2×; default decision-score lcb; min-observations 4, min-budgets 2, min-seeds 2, min-evaluators 2.
     GameAi,
     /// Benchmark curation: weight label 2×, evaluator 1.5×; default decision-score raw.
     Benchmark,
@@ -442,6 +443,15 @@ struct CalibrateArgs {
     drop_threshold: f64,
     #[arg(long, default_value_t = 0.95)]
     confidence_level: f64,
+    /// Output a single JSON object (default) or a single CSV row (header + one data row).
+    #[arg(long, default_value = "json", value_enum)]
+    output_format: CalibrateFormat,
+}
+
+#[derive(ValueEnum, Clone)]
+enum CalibrateFormat {
+    Json,
+    Csv,
 }
 
 #[derive(clap::Args)]
@@ -463,11 +473,22 @@ struct PolicyArgs {
     /// Report the loosest threshold that meets this coverage target.
     #[arg(long)]
     target_coverage: Option<f64>,
-    /// Output machine-readable JSONL (one object per swept threshold) instead of
-    /// a formatted table. Note: unlike `summary`/`explain`/`compare`/`audit`'s
+    /// Alias for --output-format json. Note: unlike `summary`/`explain`/`compare`/`audit`'s
     /// `--json` (a single pretty-printed object), this is a JSONL stream.
     #[arg(long)]
     json: bool,
+    /// Output format: text table (default), JSONL (one line per swept threshold, same as
+    /// legacy --json), or CSV (one row per swept threshold, fixed columns). Overrides
+    /// --json when both are passed.
+    #[arg(long, value_enum)]
+    output_format: Option<PolicyFormat>,
+}
+
+#[derive(ValueEnum, Clone)]
+enum PolicyFormat {
+    Text,
+    Json,
+    Csv,
 }
 
 #[derive(clap::Args)]
@@ -742,6 +763,13 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             "warning: --decision-score gold-weighted already computes a weighted vote (gold-only reliability weights); ignoring --vote weighted"
         );
     }
+    if matches!(args.decision_score, Some(DecisionScoreArg::LatentTruth))
+        && matches!(args.vote, VoteArg::Weighted)
+    {
+        eprintln!(
+            "warning: --decision-score latent-truth already computes a weighted vote (EM-estimated reliability weights); ignoring --vote weighted"
+        );
+    }
     let base_weights = match &args.profile {
         Some(ProfileArg::LlmJudge) => ScoreWeights {
             evaluator_agreement: 2.0,
@@ -775,6 +803,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
     let profile_min_obs: usize = if is_game_ai { 4 } else { 0 };
     let profile_min_budgets: usize = if is_game_ai { 2 } else { 0 };
     let profile_min_seeds: usize = if is_game_ai { 2 } else { 0 };
+    let profile_min_evaluators: usize = if is_game_ai { 2 } else { 0 };
     let config = ScoreConfig {
         score_scale: args.score_scale,
         thresholds: Thresholds {
@@ -794,7 +823,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
         confidence_k: args.confidence_k,
         min_requirements: MinRequirements {
             observations: args.min_observations_keep.max(profile_min_obs),
-            evaluators: args.min_evaluators_keep,
+            evaluators: args.min_evaluators_keep.max(profile_min_evaluators),
             seeds: args.min_seeds_keep.max(profile_min_seeds),
             budgets: args.min_budgets_keep.max(profile_min_budgets),
             models: args.min_models_keep,
@@ -804,10 +833,12 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             (Some(DecisionScoreArg::Lcb), _) => DecisionScore::LowerConfidenceBound,
             (Some(DecisionScoreArg::Adjusted), _) => DecisionScore::Adjusted,
             (Some(DecisionScoreArg::GoldWeighted), _) => DecisionScore::GoldWeighted,
+            (Some(DecisionScoreArg::LatentTruth), _) => DecisionScore::LatentTruth,
             (Some(DecisionScoreArg::Raw), _) => DecisionScore::Raw,
             (None, Some(DecisionScoreArg::Lcb)) => DecisionScore::LowerConfidenceBound,
             (None, Some(DecisionScoreArg::Adjusted)) => DecisionScore::Adjusted,
             (None, Some(DecisionScoreArg::GoldWeighted)) => DecisionScore::GoldWeighted,
+            (None, Some(DecisionScoreArg::LatentTruth)) => DecisionScore::LatentTruth,
             (None, Some(DecisionScoreArg::Raw)) => DecisionScore::Raw,
             (None, _) if args.use_lcb_score => DecisionScore::LowerConfidenceBound,
             (None, _) if args.use_adjusted_score => DecisionScore::Adjusted,
@@ -823,6 +854,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
     config.validate().context("invalid configuration")?;
     let reports = match (&config.decision_score, &args.vote) {
         (DecisionScore::GoldWeighted, _) => score_all_gold_weighted(observations.clone(), &config),
+        (DecisionScore::LatentTruth, _) => score_all_latent_truth(observations.clone(), &config),
         (_, VoteArg::Raw) => score_all(observations.clone(), &config),
         (_, VoteArg::Weighted) => score_all_weighted(observations.clone(), &config),
     };
@@ -1339,6 +1371,9 @@ fn run_compare(args: CompareArgs) -> Result<()> {
                 DecisionScoreArg::GoldWeighted => {
                     r.weighted_label_confidence.unwrap_or(r.stability_score)
                 }
+                DecisionScoreArg::LatentTruth => {
+                    r.latent_truth_confidence.unwrap_or(r.stability_score)
+                }
                 DecisionScoreArg::Raw => r.stability_score,
             };
             if score >= kt {
@@ -1354,6 +1389,7 @@ fn run_compare(args: CompareArgs) -> Result<()> {
             DecisionScoreArg::Adjusted => "adjusted",
             DecisionScoreArg::Lcb => "lcb",
             DecisionScoreArg::GoldWeighted => "gold-weighted",
+            DecisionScoreArg::LatentTruth => "latent-truth",
         };
         let mut pol_matrix = [[0usize; 3]; 3];
         for (_, a) in &pairs {
@@ -1811,6 +1847,15 @@ fn run_recommend(args: RecommendArgs) -> Result<()> {
                 "recommended_action": "add_models",
                 "model_agreement": r.model_agreement,
             }))
+        } else if r.components.score_consistency.is_some_and(|v| v < 0.7) {
+            Some(serde_json::json!({
+                "sample_id": r.sample_id,
+                "reason": "low_score_consistency",
+                "recommended_action": "reduce_score_variance",
+                "score_consistency": r.components.score_consistency,
+                "score_mad": r.score_mad,
+                "score_iqr": r.score_iqr,
+            }))
         } else {
             None
         };
@@ -1840,6 +1885,10 @@ fn run_recommend(args: RecommendArgs) -> Result<()> {
                     "low_model_agreement" => format!(
                         "model_agreement={:.3}",
                         rec["model_agreement"].as_f64().unwrap_or(0.0)
+                    ),
+                    "low_score_consistency" => format!(
+                        "score_consistency={:.3}",
+                        rec["score_consistency"].as_f64().unwrap_or(0.0)
                     ),
                     _ => String::new(),
                 };
@@ -1881,6 +1930,7 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
         Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
         Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
         Some(DecisionScoreArg::GoldWeighted) => DecisionScore::GoldWeighted,
+        Some(DecisionScoreArg::LatentTruth) => DecisionScore::LatentTruth,
         Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
     };
     let config = ScoreConfig {
@@ -1891,10 +1941,10 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
         decision_score: decision_score.clone(),
         ..ScoreConfig::default()
     };
-    let reports = if matches!(decision_score, DecisionScore::GoldWeighted) {
-        score_all_gold_weighted(observations, &config)
-    } else {
-        score_all(observations, &config)
+    let reports = match decision_score {
+        DecisionScore::GoldWeighted => score_all_gold_weighted(observations, &config),
+        DecisionScore::LatentTruth => score_all_latent_truth(observations, &config),
+        _ => score_all(observations, &config),
     };
 
     let n_total = reports.len();
@@ -1906,6 +1956,7 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
     fn label_of(r: &StabilityReport) -> Option<&str> {
         r.weighted_majority_label
             .as_deref()
+            .or(r.latent_truth_label.as_deref())
             .or(r.majority_label.as_deref())
     }
 
@@ -1967,6 +2018,7 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
         Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
         Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
         Some(DecisionScoreArg::GoldWeighted) => DecisionScore::GoldWeighted,
+        Some(DecisionScoreArg::LatentTruth) => DecisionScore::LatentTruth,
         Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
     };
 
@@ -1985,18 +2037,50 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
         )
     })?;
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "decision_score":      result.decision_score_name,
-            "keep_threshold":      result.keep_threshold,
-            "drop_threshold":      result.drop_threshold,
-            "achieved_precision":  result.achieved_precision,
-            "coverage":            result.coverage,
-            "n_keep":              result.n_keep,
-            "n_total":             result.n_total,
-        }))?
-    );
+    match args.output_format {
+        CalibrateFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "decision_score":      result.decision_score_name,
+                    "keep_threshold":      result.keep_threshold,
+                    "drop_threshold":      result.drop_threshold,
+                    "achieved_precision":  result.achieved_precision,
+                    "precision_ci_low":    result.precision_ci_low,
+                    "precision_ci_high":   result.precision_ci_high,
+                    "coverage":            result.coverage,
+                    "n_keep":              result.n_keep,
+                    "n_total":             result.n_total,
+                }))?
+            );
+        }
+        CalibrateFormat::Csv => {
+            let mut wtr = csv::Writer::from_writer(io::stdout());
+            wtr.write_record([
+                "decision_score",
+                "keep_threshold",
+                "drop_threshold",
+                "achieved_precision",
+                "precision_ci_low",
+                "precision_ci_high",
+                "coverage",
+                "n_keep",
+                "n_total",
+            ])?;
+            wtr.write_record([
+                result.decision_score_name.to_string(),
+                format!("{:.6}", result.keep_threshold),
+                format!("{:.6}", result.drop_threshold),
+                format!("{:.6}", result.achieved_precision),
+                format!("{:.6}", result.precision_ci_low),
+                format!("{:.6}", result.precision_ci_high),
+                format!("{:.6}", result.coverage),
+                result.n_keep.to_string(),
+                result.n_total.to_string(),
+            ])?;
+            wtr.flush()?;
+        }
+    }
     Ok(())
 }
 
@@ -2097,7 +2181,17 @@ fn run_policy(args: PolicyArgs) -> Result<()> {
         Some(DecisionScoreArg::Lcb) => DecisionScore::LowerConfidenceBound,
         Some(DecisionScoreArg::Adjusted) => DecisionScore::Adjusted,
         Some(DecisionScoreArg::GoldWeighted) => DecisionScore::GoldWeighted,
+        Some(DecisionScoreArg::LatentTruth) => DecisionScore::LatentTruth,
         Some(DecisionScoreArg::Raw) | None => DecisionScore::Raw,
+    };
+
+    if args.output_format.is_some() && args.json {
+        eprintln!("warning: --output-format overrides --json");
+    }
+    let format = match (&args.output_format, args.json) {
+        (Some(f), _) => f.clone(),
+        (None, true) => PolicyFormat::Json,
+        (None, false) => PolicyFormat::Text,
     };
 
     // Score with keep=0 to obtain all samples' stability scores
@@ -2110,10 +2204,10 @@ fn run_policy(args: PolicyArgs) -> Result<()> {
         confidence_level: args.confidence_level,
         ..ScoreConfig::default()
     };
-    let reports = if matches!(decision_score, DecisionScore::GoldWeighted) {
-        score_all_gold_weighted(observations.clone(), &config)
-    } else {
-        score_all(observations.clone(), &config)
+    let reports = match decision_score {
+        DecisionScore::GoldWeighted => score_all_gold_weighted(observations.clone(), &config),
+        DecisionScore::LatentTruth => score_all_latent_truth(observations.clone(), &config),
+        _ => score_all(observations.clone(), &config),
     };
     let n_total = reports.len();
     if n_total == 0 {
@@ -2150,6 +2244,7 @@ fn run_policy(args: PolicyArgs) -> Result<()> {
             fn label_of(r: &StabilityReport) -> Option<&str> {
                 r.weighted_majority_label
                     .as_deref()
+                    .or(r.latent_truth_label.as_deref())
                     .or(r.majority_label.as_deref())
             }
             let matches = kept
@@ -2195,70 +2290,101 @@ fn run_policy(args: PolicyArgs) -> Result<()> {
         .and_then(|tc| rows.iter().rposition(|r| r.coverage >= tc));
     let best_idx = best_prec_idx.or(best_cov_idx);
 
-    if args.json {
-        for (i, row) in rows.iter().enumerate() {
-            let mut obj = serde_json::Map::new();
-            obj.insert("threshold".into(), serde_json::json!(row.threshold));
-            obj.insert("n_keep".into(), serde_json::json!(row.n_keep));
-            obj.insert("coverage".into(), serde_json::json!(row.coverage));
-            if let Some(p) = row.precision {
-                obj.insert("precision".into(), serde_json::json!(p));
+    match format {
+        PolicyFormat::Json => {
+            for (i, row) in rows.iter().enumerate() {
+                let mut obj = serde_json::Map::new();
+                obj.insert("threshold".into(), serde_json::json!(row.threshold));
+                obj.insert("n_keep".into(), serde_json::json!(row.n_keep));
+                obj.insert("coverage".into(), serde_json::json!(row.coverage));
+                if let Some(p) = row.precision {
+                    obj.insert("precision".into(), serde_json::json!(p));
+                }
+                if let Some(s) = row.stable_wrong_rate {
+                    obj.insert("stable_wrong_rate".into(), serde_json::json!(s));
+                }
+                if Some(i) == best_idx {
+                    obj.insert("best".into(), serde_json::json!(true));
+                }
+                println!("{}", serde_json::to_string(&obj)?);
             }
-            if let Some(s) = row.stable_wrong_rate {
-                obj.insert("stable_wrong_rate".into(), serde_json::json!(s));
-            }
-            if Some(i) == best_idx {
-                obj.insert("best".into(), serde_json::json!(true));
-            }
-            println!("{}", serde_json::to_string(&obj)?);
         }
-    } else {
-        if has_gold {
-            println!(
-                "{:<9}  {:>6}  {:>8}  {:>9}  {:>18}",
-                "threshold", "n_keep", "coverage", "precision", "stable_wrong_rate"
-            );
-        } else {
-            println!("{:<9}  {:>6}  {:>8}", "threshold", "n_keep", "coverage");
+        PolicyFormat::Csv => {
+            let mut wtr = csv::Writer::from_writer(io::stdout());
+            wtr.write_record([
+                "threshold",
+                "n_keep",
+                "coverage",
+                "precision",
+                "stable_wrong_rate",
+                "best",
+            ])?;
+            for (i, row) in rows.iter().enumerate() {
+                wtr.write_record([
+                    format!("{:.2}", row.threshold),
+                    row.n_keep.to_string(),
+                    format!("{:.6}", row.coverage),
+                    row.precision.map(|p| format!("{p:.6}")).unwrap_or_default(),
+                    row.stable_wrong_rate
+                        .map(|s| format!("{s:.6}"))
+                        .unwrap_or_default(),
+                    if Some(i) == best_idx {
+                        "true".to_string()
+                    } else {
+                        String::new()
+                    },
+                ])?;
+            }
+            wtr.flush()?;
         }
-        for (i, row) in rows.iter().enumerate() {
-            let marker = if Some(i) == best_idx { " ←" } else { "" };
+        PolicyFormat::Text => {
             if has_gold {
                 println!(
-                    "{:<9.2}  {:>6}  {:>8.3}  {:>9}  {:>18}{}",
-                    row.threshold,
-                    row.n_keep,
-                    row.coverage,
-                    row.precision
-                        .map(|p| format!("{p:.3}"))
-                        .unwrap_or_else(|| "-".into()),
-                    row.stable_wrong_rate
-                        .map(|r| format!("{r:.3}"))
-                        .unwrap_or_else(|| "-".into()),
-                    marker
+                    "{:<9}  {:>6}  {:>8}  {:>9}  {:>18}",
+                    "threshold", "n_keep", "coverage", "precision", "stable_wrong_rate"
                 );
             } else {
-                println!(
-                    "{:<9.2}  {:>6}  {:>8.3}{}",
-                    row.threshold, row.n_keep, row.coverage, marker
-                );
+                println!("{:<9}  {:>6}  {:>8}", "threshold", "n_keep", "coverage");
             }
-        }
-        if let (Some(tp), Some(idx)) = (args.target_precision, best_prec_idx) {
-            println!(
-                "\nbest (precision >= {tp:.2}): threshold={:.2}, coverage={:.3}",
-                rows[idx].threshold, rows[idx].coverage
-            );
-        } else if args.target_precision.is_some() {
-            println!("\nno threshold in [0.50, 0.99] meets precision target");
-        }
-        if let (Some(tc), Some(idx)) = (args.target_coverage, best_cov_idx) {
-            println!(
-                "\nbest (coverage >= {tc:.2}): threshold={:.2}, n_keep={}",
-                rows[idx].threshold, rows[idx].n_keep
-            );
-        } else if args.target_coverage.is_some() {
-            println!("\nno threshold in [0.50, 0.99] meets coverage target");
+            for (i, row) in rows.iter().enumerate() {
+                let marker = if Some(i) == best_idx { " ←" } else { "" };
+                if has_gold {
+                    println!(
+                        "{:<9.2}  {:>6}  {:>8.3}  {:>9}  {:>18}{}",
+                        row.threshold,
+                        row.n_keep,
+                        row.coverage,
+                        row.precision
+                            .map(|p| format!("{p:.3}"))
+                            .unwrap_or_else(|| "-".into()),
+                        row.stable_wrong_rate
+                            .map(|r| format!("{r:.3}"))
+                            .unwrap_or_else(|| "-".into()),
+                        marker
+                    );
+                } else {
+                    println!(
+                        "{:<9.2}  {:>6}  {:>8.3}{}",
+                        row.threshold, row.n_keep, row.coverage, marker
+                    );
+                }
+            }
+            if let (Some(tp), Some(idx)) = (args.target_precision, best_prec_idx) {
+                println!(
+                    "\nbest (precision >= {tp:.2}): threshold={:.2}, coverage={:.3}",
+                    rows[idx].threshold, rows[idx].coverage
+                );
+            } else if args.target_precision.is_some() {
+                println!("\nno threshold in [0.50, 0.99] meets precision target");
+            }
+            if let (Some(tc), Some(idx)) = (args.target_coverage, best_cov_idx) {
+                println!(
+                    "\nbest (coverage >= {tc:.2}): threshold={:.2}, n_keep={}",
+                    rows[idx].threshold, rows[idx].n_keep
+                );
+            } else if args.target_coverage.is_some() {
+                println!("\nno threshold in [0.50, 0.99] meets coverage target");
+            }
         }
     }
     Ok(())

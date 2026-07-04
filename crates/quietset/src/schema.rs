@@ -111,6 +111,21 @@ pub struct StabilityReport {
     /// True when weighted_majority_label differs from majority_label. None if not computed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub majority_weighted_conflict: Option<bool>,
+    /// EM-estimated most likely true label (Dawid-Skene posterior argmax), inferred from
+    /// disagreement patterns alone — no `gold_label` needed. None if latent-truth EM did not
+    /// run for this sample (see `DecisionScore::LatentTruth`'s fallback conditions).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent_truth_label: Option<String>,
+    /// Posterior probability of `latent_truth_label`, in `[0.0, 1.0]`. None if not computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent_truth_confidence: Option<f64>,
+    /// Full EM posterior distribution over labels for this sample, sorted by probability
+    /// descending. None if not computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent_truth_label_distribution: Option<IndexMap<String, f64>>,
+    /// True when latent_truth_label differs from majority_label. None if not computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub majority_latent_conflict: Option<bool>,
     /// Mean of all numeric scores.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_mean: Option<f64>,
@@ -126,6 +141,13 @@ pub struct StabilityReport {
     /// Interquartile range of numeric scores (Q3 - Q1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_iqr: Option<f64>,
+    /// Fraction of numeric scores sharing the majority sign (negative / zero / positive).
+    /// Domain-aware complement to score_std/score_mad/score_iqr: a tightly-clustered pair like
+    /// `[+0.01, -0.01]` reads as near-perfect score consistency by magnitude alone but is a
+    /// coin-flip on sign — this field catches sign flips that dispersion metrics mask.
+    /// `None` if there are no numeric scores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_sign_agreement: Option<f64>,
     /// Normalized range of per-budget mean scores; `None` if fewer than two budget levels. (`[0.0, 1.0]`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_sensitivity: Option<f64>,

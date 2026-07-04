@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### Added
+- `DecisionScore::LatentTruth` (`--decision-score latent-truth`) — Dawid-Skene EM-estimated
+  label vote, replacing the raw majority vote with per-evaluator confusion-matrix-inferred
+  reliability. Unlike `gold-weighted`, needs no `gold_label` at all — infers reliability
+  purely from disagreement patterns across observations, so a systematically-biased
+  evaluator can no longer make a wrong label look like a stable majority. Falls back to
+  identical `raw` behavior when the batch has fewer than 2 distinct evaluators or labels.
+  Adds `latent_truth_label`, `latent_truth_confidence`, `latent_truth_label_distribution`,
+  `majority_latent_conflict` to `StabilityReport`; supported by `score`, `compare
+  --policy-after`, `calibrate`, `policy`, and `stable-wrong-risk`, mirroring `gold-weighted`'s
+  existing integration everywhere. `latent_truth_confidence` is EM's fitted posterior, which
+  saturates toward 0/1 with only a few evaluators and can be confidently wrong under
+  correlated evaluator bias — not a correctness guarantee, same "stable ≠ correct" caveat as
+  the rest of quietset
+- `StabilityReport` gains `score_sign_agreement` — fraction of numeric scores sharing the
+  majority sign (negative/zero/positive), a domain-aware complement to
+  `score_std`/`score_mad`/`score_iqr` for signed, zero-centered scores (chess/shogi-style
+  eval), which are magnitude-only and read a sign flip like `[+0.01, -0.01]` as
+  near-perfectly stable. Always computed, informational only for v1 — not wired into
+  `stability_score`, `filter`, `audit`, or `recommend`
+- `recommend` — new `low_score_consistency` rule (score_consistency < 0.7 →
+  `reduce_score_variance`), the one signal `audit`/`active-review` already surfaced under
+  different names but `recommend` itself lacked
+- `calibrate --output-format json|csv` — CSV output (single header + data row) alongside
+  the existing JSON object
+- `policy --output-format text|json|csv` — CSV output (one row per swept threshold, fixed
+  columns; `precision`/`stable_wrong_rate` empty when no gold present); `--json` kept as a
+  backward-compatible alias for `--output-format json` (warns if both are passed)
+- `calibrate`'s `achieved_precision` now ships `precision_ci_low`/`precision_ci_high` — a
+  Wilson score interval (same `--confidence-level` used elsewhere for Wilson LCB) that widens
+  automatically when few gold labels back the estimate, generalized from the existing
+  `wilson_lcb` two-sided (`quietset::scoring::wilson_ci`, `pub(crate)`). Covers sampling noise
+  at the chosen threshold only, not the fact that the threshold was itself selected against
+  these same gold labels — documented as still optimistic in the README
+
+### Changed
+- `--profile game-ai` now also bumps `--min-evaluators-keep` to 2 (matching the existing
+  min-observations/min-budgets/min-seeds auto-tightening), closing a gap where a user had to
+  pass it manually to get the profile's full conservatism
+- README.md/README_ja.md: Python bindings section now discloses that `crates/quietset-py` is
+  excluded from the Cargo workspace and CI, not just its alpha/experimental status;
+  README_ja.md's Python bindings section brought to full content parity with README.md's
+
 ## 0.10.0 — 2026-07-04
 
 ### Added

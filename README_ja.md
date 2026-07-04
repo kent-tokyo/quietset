@@ -151,19 +151,19 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `active-review` | JSONL | なし | 順位付けされたサンプルごとに1オブジェクト |
 | `recommend` | JSONL | `--text` | JSONLがデフォルトでtextが例外という唯一のコマンド |
 | `stable-wrong-risk` | 単一のpretty JSONオブジェクト | なし | |
-| `calibrate` | 単一のpretty JSONオブジェクト | なし | |
+| `calibrate` | 単一のpretty JSONオブジェクト | `--output-format json\|csv` | `csv`はヘッダー行1つ＋データ行1つ |
 | `summary` | text | `--json`（単一のpretty JSONオブジェクト） | |
 | `explain` | text | `--json`（単一のpretty JSONオブジェクト） | |
 | `compare` | text | `--json`（単一のpretty JSONオブジェクト） | |
 | `audit` | text | `--json`（単一のpretty JSONオブジェクト） | |
-| `policy` | textテーブル | `--json`（**JSONL**、閾値ごとに1行——上記4コマンドの単一オブジェクトとは異なる） | |
+| `policy` | textテーブル | `--output-format text\|json\|csv`（旧`--json`は`json`のエイリアスとして引き続き使用可） | `json`はJSONL(閾値ごとに1行)、`csv`は固定列(`gold_label`が無い場合は空セル) | |
 
-**CSVはパイプ用途では行き止まり。** `score --output-format csv`はスプレッドシート/BIツール向けの
-エクスポート専用。他のどのquietsetコマンドもCSVを読み戻せない（`filter`/`summary`/`explain`/
-`compare`/`audit`/`select`/`recommend`/`active-review`はいずれもJSONL形式の`StabilityReport`を
-期待し、`stable-wrong-risk`/`calibrate`/`reliability`/`policy`はJSONL形式の`Observation`を期待す
-る）。`score`の出力を他のquietsetコマンドにパイプする予定があるなら、`csv`ではなくデフォルトの
-`jsonl`を使うこと。
+**CSVはパイプ用途では行き止まり。** `score --output-format csv`、`calibrate --output-format csv`、
+`policy --output-format csv`はスプレッドシート/BIツール向けのエクスポート専用。他のどのquietset
+コマンドもCSVを読み戻せない（`filter`/`summary`/`explain`/`compare`/`audit`/`select`/
+`recommend`/`active-review`はいずれもJSONL形式の`StabilityReport`を期待し、`stable-wrong-risk`/
+`calibrate`/`reliability`/`policy`はJSONL形式の`Observation`を期待する）。`score`の出力を他の
+quietsetコマンドにパイプする予定があるなら、`csv`ではなくデフォルトの`jsonl`を使うこと。
 
 ## 入力 JSONL フォーマット
 
@@ -238,6 +238,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `label_agreement_lcb` | `label_agreement` の Wilson 信頼区間下限。少数観測の過信を防ぐ保守的な指標。 |
 | `score_mad` | スコアの中央絶対偏差（MAD）。外れ値への耐性が `score_std` より高い。 |
 | `score_iqr` | スコアの四分位範囲（Q3 − Q1）。 |
+| `score_sign_agreement` | 数値スコアの多数派符号（負・0・正）が占める割合。符号付きでゼロ中心のスコア（将棋・チェス系の評価値）向けの、magnitude 系指標（`score_std`/`score_mad`/`score_iqr`）を補完する指標 — `[+0.01, -0.01]` は magnitude だけ見るとほぼ完全に安定に見えるが、符号は五分五分。参考情報のみで `stability_score` には含まれない。 |
 | `budget_slope` | budget 増加に対するスコアの傾き（正 = 上昇収束） |
 | `confidence` | `n / (n + k)` — 証拠量に基づくスコアの信頼度 |
 | `adjusted_stability_score` | `stability * confidence + 0.5 * (1 - confidence)` |
@@ -270,7 +271,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 |------------|--------|------------------------|
 | `llm-judge` | evaluator ×2、model ×2 | `lcb` |
 | `simulation` | budget ×2、seed ×2 | `adjusted` |
-| `game-ai` | budget ×2、seed ×2、最低観測数 4、最低budget数 2、最低seed数 2 | `lcb` |
+| `game-ai` | budget ×2、seed ×2、最低観測数 4、最低budget数 2、最低seed数 2、最低evaluator数 2 | `lcb` |
 | `benchmark` | label ×2、evaluator ×1.5 | `raw` |
 
 ```bash
@@ -314,7 +315,7 @@ quietset score input.jsonl \
 
 ## 判定（decision）
 
-デフォルトでは `stability_score` が判定に使われます。4つのモードがあります。
+デフォルトでは `stability_score` が判定に使われます。5つのモードがあります。
 
 | フラグ | alias | 使用スコア | 特性 |
 |-------|-------|----------|------|
@@ -322,6 +323,7 @@ quietset score input.jsonl \
 | `--decision-score adjusted` | `--use-adjusted-score` | `adjusted_stability_score` | 証拠量に比例してペナルティ。 |
 | `--decision-score lcb` | `--use-lcb-score` | `label_agreement_lcb`（ラベル部分） | Wilson LCB — 最も保守的。2/2 一致でも LCB ≈ 0.34（95%信頼）になり、証拠なしでは keep にならない。 |
 | `--decision-score gold-weighted` | — | `stability_score`（ラベル部分を信頼性で重み付け） | 生の多数決の代わりに `gold_label` の一致履歴に基づく信頼性重み付き投票を使用。バッチ全体に `gold_label` が一つも無い場合は `raw` と同一の挙動になる。 |
+| `--decision-score latent-truth` | — | `stability_score`（ラベル部分をEMで重み付け） | 生の多数決の代わりに Dawid-Skene EM が推定した投票を使用 — `gold_label` なしで、不一致パターンだけから評価者ごとの信頼性を推定する。バッチ全体で評価者またはラベルの種類が2未満の場合は `raw` と同一の挙動になる。出力に `latent_truth_label`、`latent_truth_confidence`、`latent_truth_label_distribution`、`majority_latent_conflict` が追加される。`latent_truth_confidence` はEMが当てはめた事後確率であり、評価者が少ないと 0/1 に張り付きやすく、評価者のバイアスが相関している場合は自信満々に間違うこともある — 正しさの保証ではない。 |
 
 `MinRequirements` はどのモードでも閾値判定の**後に**適用されます。
 
@@ -553,6 +555,8 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
   "keep_threshold": 0.91,
   "drop_threshold": 0.40,
   "achieved_precision": 0.982,
+  "precision_ci_low": 0.943,
+  "precision_ci_high": 0.997,
   "coverage": 0.61,
   "n_keep": 610,
   "n_total": 1000
@@ -561,6 +565,23 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 
 `keep_threshold` を 0.99 から 0.50 まで 0.01 刻みで探索し、精度目標を満たす最も緩い閾値を返します。
 `gold_label` がない場合や目標を達成できない場合はエラーになります（`--target-precision` を下げてください）。
+
+`precision_ci_low`/`precision_ci_high` は `achieved_precision` に対する Wilson score interval で、
+`--confidence-level`（`lcb` decision score と同じノブ）を使う。gold ラベルが少ないと自動的に広がる
+ので、`n_keep` が小さいときは `achieved_precision` 単体を正確な値として扱わないこと。この区間は
+選ばれた閾値における標本誤差のみをカバーしており、その閾値自体が同じ gold ラベルに対して目標を
+満たすように選ばれた（cherry-pick された）という事実は反映していない — 楽観的な値になる。下限の
+目安として扱い、より保守的に確認したい場合は held-out の gold セットを使うこと。
+
+`--output-format csv` でJSONオブジェクトの代わりにヘッダー行1つ＋データ行1つを出力できる:
+
+```bash
+quietset calibrate input.jsonl --target-precision 0.95 --output-format csv
+```
+```csv
+decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total
+lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000
+```
 
 ## select コマンド
 
@@ -604,6 +625,7 @@ quietset recommend scored.jsonl --unstable-only   # 問題のない keep をス�
 | `high_seed_sensitivity` | seed_sensitivity > 0.3 → `add_seeds` |
 | `high_budget_sensitivity` | budget_sensitivity > 0.3 → `increase_budget` |
 | `low_model_agreement` | model_agreement < 0.7 → `add_models` |
+| `low_score_consistency` | score_consistency < 0.7 → `reduce_score_variance` |
 
 各サンプルにつき最大1件の提案（優先度が最も高いルールが採用されます）。
 
@@ -672,7 +694,20 @@ threshold  n_keep  coverage
 
 観測に `gold_label` があれば、表に `precision` と `stable_wrong_rate` の列も追加されます。
 `--target-precision`/`--target-coverage` は目標を満たす最も緩い閾値を `←` で示します。
-`--json` は整形テーブルの代わりに閾値ごとに1行のJSONLを出力します。
+`--output-format json` は整形テーブルの代わりに閾値ごとに1行のJSONLを出力します(`--json` も
+引き続きエイリアスとして使用可。両方指定すると警告が出て `--output-format` が優先される)。
+`--output-format csv` は閾値ごとに1行、固定列 `threshold,n_keep,coverage,precision,
+stable_wrong_rate,best` で出力し、`gold_label` が無い場合は `precision`/`stable_wrong_rate`
+が空、`best` は `--target-precision`/`--target-coverage` に一致する行だけ `true`:
+
+```bash
+quietset policy input.jsonl --target-precision 0.95 --output-format csv
+```
+```csv
+threshold,n_keep,coverage,precision,stable_wrong_rate,best
+0.99,1,0.500000,1.000000,0.000000,
+0.98,1,0.500000,1.000000,0.000000,true
+```
 
 ## active-review コマンド
 
@@ -721,7 +756,10 @@ if let Some(report) = scorer.flush() { println!("{:?}", report.decision); }
 
 ## Python バインディング
 
-`crates/quietset-py/` に pyo3 + maturin を使ったバインディングがあります。
+`crates/quietset-py` に [pyo3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/) を使った Python バインディングがあります。
+状態: **alpha / experimental** — コアのスコアリング API はラップ済みだが、インターフェースは今後変わる可能性がある。
+Cargo workspace および CI からは除外されており(`cargo build/test --workspace` では一切触れない)、
+`crates/quietset-py` 内で個別にビルド・テストする必要がある。
 
 ```bash
 cd crates/quietset-py
@@ -734,6 +772,10 @@ import quietset
 result = quietset.score_jsonl('{"sample_id":"a","label":"win","score":0.9}\n' * 2)
 print(result)
 ```
+
+バインディングは現在 `score_jsonl` という単一の関数のみを公開しており、JSONL 文字列をデフォルト設定でスコアリングして
+JSONL 文字列を返す。CLI が全コマンド・全オプションを備えた安定インターフェースであり、Python バインディングは
+サブプロセス起動が難しい既存の Python パイプラインに簡易スコアリングを組み込む用途向け。
 
 ## 類似ツールとの比較
 

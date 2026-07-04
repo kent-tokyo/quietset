@@ -20,16 +20,26 @@ fn normal_quantile(p: f64) -> f64 {
     if p < 0.5 { -x } else { x }
 }
 
-fn wilson_lcb(successes: usize, trials: usize, confidence_level: f64) -> f64 {
+/// Two-sided Wilson score interval for a binomial proportion `successes / trials`.
+pub(crate) fn wilson_ci(successes: usize, trials: usize, confidence_level: f64) -> (f64, f64) {
     if trials == 0 {
-        return 0.0;
+        return (0.0, 0.0);
     }
     let p = successes as f64 / trials as f64;
     let z = normal_quantile((1.0 + confidence_level) / 2.0);
     let n = trials as f64;
     let z2 = z * z;
-    let num = p + z2 / (2.0 * n) - z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
-    (num / (1.0 + z2 / n)).clamp(0.0, 1.0)
+    let center = p + z2 / (2.0 * n);
+    let margin = z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+    let denom = 1.0 + z2 / n;
+    (
+        ((center - margin) / denom).clamp(0.0, 1.0),
+        ((center + margin) / denom).clamp(0.0, 1.0),
+    )
+}
+
+fn wilson_lcb(successes: usize, trials: usize, confidence_level: f64) -> f64 {
+    wilson_ci(successes, trials, confidence_level).0
 }
 
 /// Linear interpolation between order statistics (matches NumPy's/R's default "linear" method).
@@ -61,14 +71,16 @@ pub fn compute_report(
     compute_report_inner(sample_id, obs, config, None)
 }
 
-/// Same as [`compute_report`] but accepts a pre-computed gold-weighted label confidence,
-/// used only when `config.decision_score == DecisionScore::GoldWeighted` (see
-/// [`crate::score_all_gold_weighted`]). `None` reproduces `compute_report`'s behavior exactly.
+/// Same as [`compute_report`] but accepts a pre-computed externally-derived label confidence,
+/// used when `config.decision_score` is `GoldWeighted` (see [`crate::score_all_gold_weighted`])
+/// or `LatentTruth` (see [`crate::score_all_latent_truth`]) — the two variants are mutually
+/// exclusive by construction (`decision_score` is a single enum value), so one parameter
+/// serves both. `None` reproduces `compute_report`'s behavior exactly.
 pub(crate) fn compute_report_inner(
     sample_id: &str,
     obs: &[Observation],
     config: &ScoreConfig,
-    gold_weighted_confidence: Option<f64>,
+    external_label_confidence: Option<f64>,
 ) -> StabilityReport {
     debug_assert!(
         config.score_scale.is_finite() && config.score_scale > 0.0,
@@ -177,6 +189,22 @@ pub(crate) fn compute_report_inner(
         (None, None)
     };
 
+    let score_sign_agreement = if scores.is_empty() {
+        None
+    } else {
+        let (mut neg, mut zero, mut pos) = (0usize, 0usize, 0usize);
+        for s in &scores {
+            if *s > 0.0 {
+                pos += 1;
+            } else if *s < 0.0 {
+                neg += 1;
+            } else {
+                zero += 1;
+            }
+        }
+        Some(neg.max(zero).max(pos) as f64 / scores.len() as f64)
+    };
+
     // --- sensitivity / agreement ---
     let budget_sensitivity = compute_range_sensitivity(
         obs,
@@ -203,12 +231,14 @@ pub(crate) fn compute_report_inner(
         let mut wsum = 0.0_f64;
         let mut wtotal = 0.0_f64;
 
-        // For LCB mode, use label_agreement_lcb as the label component; for GoldWeighted,
-        // use the externally-computed reliability-weighted confidence (falls back to
-        // label_agreement when none was supplied, e.g. no gold_label anywhere in the batch).
+        // For LCB mode, use label_agreement_lcb as the label component; for GoldWeighted /
+        // LatentTruth, use the externally-computed confidence (falls back to label_agreement
+        // when none was supplied, e.g. no gold_label anywhere in the batch, or EM didn't run).
         let label_for_score = match config.decision_score {
             DecisionScore::LowerConfidenceBound => label_agreement_lcb,
-            DecisionScore::GoldWeighted => gold_weighted_confidence.or(label_agreement),
+            DecisionScore::GoldWeighted | DecisionScore::LatentTruth => {
+                external_label_confidence.or(label_agreement)
+            }
             _ => label_agreement,
         };
 
@@ -255,6 +285,7 @@ pub(crate) fn compute_report_inner(
         DecisionScore::Adjusted => adjusted_stability_score,
         DecisionScore::LowerConfidenceBound => stability_score,
         DecisionScore::GoldWeighted => stability_score,
+        DecisionScore::LatentTruth => stability_score,
     };
     let mut decision = decide(base_score, &config.thresholds);
 
@@ -321,11 +352,16 @@ pub(crate) fn compute_report_inner(
         weighted_label_confidence: None,
         weighted_label_distribution: None,
         majority_weighted_conflict: None,
+        latent_truth_label: None,
+        latent_truth_confidence: None,
+        latent_truth_label_distribution: None,
+        majority_latent_conflict: None,
         score_mean,
         score_std,
         score_range,
         score_mad,
         score_iqr,
+        score_sign_agreement,
         budget_sensitivity,
         budget_slope,
         seed_sensitivity,

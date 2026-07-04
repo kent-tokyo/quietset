@@ -26,6 +26,12 @@ pub enum DecisionScore {
     /// Falls back to identical behavior as `Raw` when no `gold_label` is present anywhere in
     /// the batch (see [`crate::score_all_gold_weighted`]).
     GoldWeighted,
+    /// Use a Dawid-Skene EM-estimated label vote in place of raw majority agreement — infers
+    /// per-evaluator reliability and per-sample label posteriors from disagreement patterns
+    /// alone, no `gold_label` required. Falls back to identical behavior as `Raw` when the
+    /// batch has fewer than 2 distinct evaluator_ids or fewer than 2 distinct labels among
+    /// observations carrying both fields (see [`crate::score_all_latent_truth`]).
+    LatentTruth,
 }
 
 /// Minimum observation counts required for a Keep decision. Samples not meeting these are demoted to Review.
