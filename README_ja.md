@@ -872,6 +872,31 @@ quietset active-review scored.jsonl --plan next_eval_plan.jsonl --budget 20.0
 これは knapsack 型の予算配分問題に対する標準的な value-density 貪欲近似であり、大域最適は
 保証されないが、「次のレビュー予算を何に使うべきか」の順位付けとしては妥当なものになる。
 
+`--observations <path>`（`score` を実行したのと同じ生の observation JSONL）を渡すと、
+`suggested_action` に対する具体的な target 値も計算される — `StabilityReport` には派生統計
+（sensitivity/robustness スコア）しかなく、target をサイジングするための生の
+budget/seed/evaluator/model 値が失われているため。`audit --observations` が agreement 統計
+のために埋めているのと同じギャップです:
+
+```bash
+quietset active-review scored.jsonl --observations input.jsonl
+```
+
+```json
+{"cost":1.0,"expected_coverage_gain":1.0,"expected_risk_reduction":0.0,"label_agreement_flip_ratio":0.766,"label_agreement_lcb":0.510,"label_entropy":0.0,"primary_reason":"high_seed_sensitivity","sample_id":"pricey","seed_sensitivity":0.8,"suggested_action":"add_seed","target_seed":2,"urgency_score":0.423,"utility":0.766}
+```
+
+`suggested_action` に対応するフィールドだけが、そのサンプル自身の observation から計算される:
+
+- `increase_budget` → `target_budget` = そのサンプルで観測された最大 `budget` × 2
+- `add_seed` → `target_seed` = そのサンプルで観測された最大 `seed` + 1
+- `add_evaluator` → `target_evaluator_slot` = そのサンプルの distinct `evaluator_id` 数 + 1
+- `add_model` → `target_model_slot` = そのサンプルの distinct `model_id` 数 + 1
+- `request_gold_label` → target field なし（サイジングする対象がないため）
+
+`--observations` を渡さない場合はすべて省略され、observation ファイルに該当する生の値が
+存在しない場合もサンプルごとに省略される — 捏造した既定値になることはない。
+
 ## Rust API
 
 ```rust

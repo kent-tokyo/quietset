@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+- `active-review` gains `--observations <path>` and, when supplied, per-entry
+  `target_budget`/`target_seed`/`target_evaluator_slot`/`target_model_slot` fields sizing a
+  concrete target for `suggested_action` from that sample's own raw observations —
+  `StabilityReport` only carries derived stats, not the raw budget/seed/evaluator/model values
+  needed to size one, the same gap `audit --observations` fills for agreement stats. Only the
+  field matching `suggested_action` is ever populated (`increase_budget` → `target_budget` =
+  max observed `budget` × 2; `add_seed` → `target_seed` = max observed `seed` + 1;
+  `add_evaluator`/`add_model` → `target_evaluator_slot`/`target_model_slot` = distinct
+  evaluator/model count + 1; `request_gold_label` gets none). All four fields are omitted
+  without `--observations`, and omitted per-sample whenever the relevant raw value is missing
+  — never a fabricated default. New library function `quietset::action_target_fields`.
+
 ## 0.12.0 — 2026-07-05
 
 ### Added

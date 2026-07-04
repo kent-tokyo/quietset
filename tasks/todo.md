@@ -332,3 +332,47 @@ Phase 16's held-out split and Phase 17's EV-active-review).
   Added/Changed entries
 - [x] cargo build --workspace --all-targets + test (31 lib + 85 integration + 15 CLI + 2 doctest)
   + clippy -D warnings + fmt clean
+
+## Phase 19: v0.12.0 release cut, active-review action target fields (done)
+
+A fifth large external-review-style proposal (an 11-item roadmap, largely in Japanese)
+re-proposed most of the same twice-rejected roadmap again: policy-file TOML (rejected 2x
+already), `schema_version` (rejected already, "a compat shim for a v2 that doesn't exist"),
+plus new unjustified performance work (string interning, a streaming CLI mode, spill-to-disk,
+`--memory-limit`/`--partition-by`). Investigation found the "recompute scoring repeatedly"
+premise behind the performance work is false — `calibrate`/`policy` already score once and
+sweep a precomputed field (`calibration.rs:98-123`, `main.rs:2419-2502`), `StreamingScorer`
+already exists (`stream.rs`), and `benches/scoring.rs` already benchmarks up to 5,000
+observations — nowhere near the "millions of rows" the proposal assumed. Confirmed all of this
+with the user via `AskUserQuestion`; all three contested items were declined, holding the
+standing rejections rather than re-litigating them. Almost the entire "already exists" portion
+of the proposal (LatentTruth safety demotion, `calibrate --heldout`/`--fail-below-target`,
+`stable-wrong-risk --breakdown`, active-review `--plan`/`--budget`) turned out to already be
+implemented in `Unreleased` from Phase 18 — the only real remaining work there was cutting the
+release. One item was genuinely new and buildable: active-review's per-action target fields.
+
+- [x] `CHANGELOG.md` `Unreleased` promoted to `## 0.12.0 — 2026-07-05`; fresh empty `Unreleased`
+  added above it
+- [x] `crates/quietset/Cargo.toml` and `crates/quietset-cli/Cargo.toml` (including the
+  `quietset` path-dependency version pin) bumped to `0.12.0`; `cargo build --workspace` to
+  refresh `Cargo.lock`
+- [x] README.md/README_ja.md spot-checked against every `Unreleased` entry being promoted
+  (heldout, breakdown, plan/budget, safety demotion, game-ai `score_sign`) — already at parity
+  from Phase 16-18's own doc-update steps, no changes needed
+- [x] Release stopped at local prep, by explicit user choice: version bump + CHANGELOG +
+  commit only. Tagging (`git tag v0.12.0 && git push --tags`, which triggers
+  `.github/workflows/release.yml`'s automated GitHub Release) and `cargo publish` (irreversible)
+  are left for the user to run outside this session
+- [x] active-review gains `--observations <path>` (same rationale as `audit --observations`:
+  target-field sizing needs raw per-sample budget/seed/evaluator/model values that don't exist
+  on `StabilityReport`, which only holds derived stats) and, when supplied, per-entry
+  `target_budget`/`target_seed`/`target_evaluator_slot`/`target_model_slot` fields sized from
+  that sample's actual observed data (double the max budget, max seed + 1, distinct
+  evaluator/model count + 1 respectively) — `None`/absent without `--observations`, so existing
+  callers are unaffected. `request_gold_label` gets no target field (nothing to size). Kept as
+  flat `Option` fields on `ActiveReviewEntry` (not a nested struct) for JSON readability and
+  consistency with how `latent_truth_demotion_reason` was added to `StabilityReport`
+- [x] policy-file TOML, `schema_version`, and the interning/streaming/spill-to-disk performance
+  work all declined again this cycle — not added to the codebase
+- [x] cargo fmt --all + clippy --workspace --all-targets -D warnings + test --workspace +
+  doc --workspace --no-deps clean

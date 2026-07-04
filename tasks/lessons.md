@@ -405,6 +405,26 @@ fixture in this project (the first was Phase 17's latent-truth convergence itera
 worth treating as the default approach for any new fixture whose target is a statistically-fit
 outcome rather than a hand-computed one.
 
+## A fifth re-proposal of the same rejected roadmap is still a signal, not a reason to relax the filter
+
+An 11-item proposal (largely in Japanese, structured like the four prior "large external
+review" cycles) re-proposed policy-file TOML (rejected 2x) and `schema_version` (rejected once)
+again, plus new performance work (string interning, streaming CLI mode, spill-to-disk,
+`--memory-limit`/`--partition-by`) framed as urgent given "large-scale JSONL." The performance
+premise didn't survive a direct check: `calibrate`/`policy` already score once and sweep a
+precomputed field (no rescoring-per-threshold exists), `StreamingScorer` already exists and is
+already benchmarked, and the largest data anything in the repo is ever exercised against —
+including `benches/scoring.rs` — is 5,000 synthetic observations, not "millions of rows." Citing
+this evidence plus the prior-rejection reasoning directly to the user via `AskUserQuestion`
+(rather than either silently rejecting or silently building) got a clean decision to hold all
+three lines again. The one item that survived scrutiny — active-review per-action target
+fields — did so because it was concretely specified, small, and hit a real architectural gap
+(`StabilityReport` has no raw budget/seed/evaluator values to size a target from) with an
+existing, proven solution pattern to copy (`audit --observations`). Lesson restated for a fifth
+time because it keeps mattering: the discriminator between "build it" and "decline it" is
+concrete evidence and an existing precedent to extend, not the size or confidence of the
+proposal asking for it.
+
 ## A previously-deliberate "don't touch this default" decision is not permanent once the user asks for it by name
 
 Phase 16 deliberately left `--profile game-ai`'s weights untouched when `score_sign_agreement`

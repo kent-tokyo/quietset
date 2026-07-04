@@ -944,6 +944,30 @@ This is a standard greedy value-density approximation for a knapsack-style budge
 problem — not guaranteed globally optimal, but sound for "what should the next batch of review
 effort go toward."
 
+Pass `--observations <path>` (the same raw observation JSONL `score` was run on) to also size a
+concrete target for `suggested_action` — `StabilityReport` only carries derived stats
+(sensitivity/robustness scores), not the raw budget/seed/evaluator/model values needed to size
+one, the same gap `audit --observations` fills for agreement stats:
+
+```bash
+quietset active-review scored.jsonl --observations input.jsonl
+```
+
+```json
+{"cost":1.0,"expected_coverage_gain":1.0,"expected_risk_reduction":0.0,"label_agreement_flip_ratio":0.766,"label_agreement_lcb":0.510,"label_entropy":0.0,"primary_reason":"high_seed_sensitivity","sample_id":"pricey","seed_sensitivity":0.8,"suggested_action":"add_seed","target_seed":2,"urgency_score":0.423,"utility":0.766}
+```
+
+Only the field matching `suggested_action` is populated, from that sample's own observations:
+
+- `increase_budget` → `target_budget` = the sample's max observed `budget` × 2
+- `add_seed` → `target_seed` = the sample's max observed `seed` + 1
+- `add_evaluator` → `target_evaluator_slot` = the sample's distinct `evaluator_id` count + 1
+- `add_model` → `target_model_slot` = the sample's distinct `model_id` count + 1
+- `request_gold_label` → no target field (nothing to size for a label request)
+
+All four fields are omitted without `--observations`, and omitted per-sample whenever the
+relevant raw value is missing from the observations file — never a fabricated default.
+
 ## Rust API
 
 ```rust

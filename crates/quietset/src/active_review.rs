@@ -1,4 +1,5 @@
 use crate::decision::Thresholds;
+use crate::observation::Observation;
 use crate::schema::{Decision, StabilityReport};
 
 /// Weights for the five urgency signals. All default to `1.0`, matching each signal
@@ -93,6 +94,17 @@ pub struct ActiveReviewEntry {
     /// actions rank higher), but the absolute number should not be read as a calibrated
     /// expectation.
     pub utility: f64,
+    /// Resource-sizing targets for `suggested_action`, from [`action_target_fields`]. `None`
+    /// for every field unless the caller supplies raw observations (`--observations` on the
+    /// CLI) — `StabilityReport` only carries derived stats, not the raw budget/seed/evaluator/
+    /// model values needed to size a concrete target, the same gap `audit --observations`
+    /// fills for agreement stats. Flattened onto the entry (not a nested struct) for JSON
+    /// output simplicity, consistent with how `latent_truth_demotion_reason` sits directly on
+    /// `StabilityReport`.
+    pub target_budget: Option<f64>,
+    pub target_seed: Option<u64>,
+    pub target_evaluator_slot: Option<usize>,
+    pub target_model_slot: Option<usize>,
 }
 
 /// Distance-to-threshold ratio for `label_agreement`, given its Wilson LCB and the
@@ -248,6 +260,10 @@ pub fn rank_active_review(
             expected_risk_reduction,
             cost,
             utility,
+            target_budget: None,
+            target_seed: None,
+            target_evaluator_slot: None,
+            target_model_slot: None,
         });
     }
 
@@ -292,6 +308,67 @@ pub fn select_within_budget(entries: &[ActiveReviewEntry], budget: f64) -> Vec<A
         }
     }
     selected
+}
+
+/// Computes [`ActiveReviewEntry`]'s `target_*` fields for one sample's `suggested_action`,
+/// from that sample's own raw observations. Only the field matching `suggested_action` is
+/// ever populated — `request_gold_label` gets none, since there's no resource count to size
+/// for a label request. `None` (not a fabricated 0 or a guessed default) whenever the
+/// relevant raw values are absent from `observations`, since a made-up number here would be
+/// exactly the kind of unchecked hand-typed value this project's own history warns against.
+pub fn action_target_fields(suggested_action: &str, observations: &[Observation]) -> ActionTargets {
+    match suggested_action {
+        "increase_budget" => ActionTargets {
+            target_budget: observations
+                .iter()
+                .filter_map(|o| o.budget)
+                .fold(None, |max: Option<f64>, b| {
+                    Some(max.map_or(b, |m| m.max(b)))
+                })
+                .map(|max_budget| max_budget * 2.0),
+            ..ActionTargets::default()
+        },
+        "add_seed" => ActionTargets {
+            target_seed: observations
+                .iter()
+                .filter_map(|o| o.seed)
+                .max()
+                .map(|max_seed| max_seed + 1),
+            ..ActionTargets::default()
+        },
+        "add_evaluator" => ActionTargets {
+            target_evaluator_slot: distinct_count(
+                observations
+                    .iter()
+                    .filter_map(|o| o.evaluator_id.as_deref()),
+            ),
+            ..ActionTargets::default()
+        },
+        "add_model" => ActionTargets {
+            target_model_slot: distinct_count(
+                observations.iter().filter_map(|o| o.model_id.as_deref()),
+            ),
+            ..ActionTargets::default()
+        },
+        _ => ActionTargets::default(),
+    }
+}
+
+/// `Some(n + 1)` where `n` is the number of distinct values in `ids` — "this would be the
+/// (n+1)th slot" — or `None` if `ids` is empty (no evidence to size a slot count from).
+fn distinct_count<'a>(ids: impl Iterator<Item = &'a str>) -> Option<usize> {
+    let n = ids.collect::<std::collections::HashSet<_>>().len();
+    if n == 0 { None } else { Some(n + 1) }
+}
+
+/// Resource-sizing targets from [`action_target_fields`]. See [`ActiveReviewEntry`]'s
+/// `target_*` fields for what each one means.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ActionTargets {
+    pub target_budget: Option<f64>,
+    pub target_seed: Option<u64>,
+    pub target_evaluator_slot: Option<usize>,
+    pub target_model_slot: Option<usize>,
 }
 
 #[cfg(test)]
@@ -712,6 +789,10 @@ mod tests {
             expected_risk_reduction: 0.0,
             cost,
             utility,
+            target_budget: None,
+            target_seed: None,
+            target_evaluator_slot: None,
+            target_model_slot: None,
         }
     }
 
@@ -750,5 +831,99 @@ mod tests {
     fn test_select_within_budget_zero_budget_selects_nothing() {
         let entries = vec![dummy_entry("a", 0.5, 2.0)];
         assert!(select_within_budget(&entries, 0.0).is_empty());
+    }
+
+    fn obs_with_budget(budget: f64) -> Observation {
+        Observation {
+            sample_id: "s".into(),
+            budget: Some(budget),
+            ..Default::default()
+        }
+    }
+
+    fn obs_with_seed(seed: u64) -> Observation {
+        Observation {
+            sample_id: "s".into(),
+            seed: Some(seed),
+            ..Default::default()
+        }
+    }
+
+    fn obs_with_evaluator(evaluator_id: &str) -> Observation {
+        Observation {
+            sample_id: "s".into(),
+            evaluator_id: Some(evaluator_id.into()),
+            ..Default::default()
+        }
+    }
+
+    fn obs_with_model(model_id: &str) -> Observation {
+        Observation {
+            sample_id: "s".into(),
+            model_id: Some(model_id.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_action_target_fields_increase_budget_doubles_max_observed_budget() {
+        let obs = vec![
+            obs_with_budget(2.0),
+            obs_with_budget(4.0),
+            obs_with_budget(3.0),
+        ];
+        let targets = action_target_fields("increase_budget", &obs);
+        assert_eq!(targets.target_budget, Some(8.0));
+        assert_eq!(targets.target_seed, None);
+        assert_eq!(targets.target_evaluator_slot, None);
+        assert_eq!(targets.target_model_slot, None);
+    }
+
+    #[test]
+    fn test_action_target_fields_add_seed_increments_max_observed_seed() {
+        let obs = vec![obs_with_seed(1), obs_with_seed(5), obs_with_seed(2)];
+        let targets = action_target_fields("add_seed", &obs);
+        assert_eq!(targets.target_seed, Some(6));
+        assert_eq!(targets.target_budget, None);
+    }
+
+    #[test]
+    fn test_action_target_fields_add_evaluator_counts_distinct_plus_one() {
+        let obs = vec![
+            obs_with_evaluator("e1"),
+            obs_with_evaluator("e2"),
+            obs_with_evaluator("e1"),
+            obs_with_evaluator("e3"),
+        ];
+        let targets = action_target_fields("add_evaluator", &obs);
+        assert_eq!(targets.target_evaluator_slot, Some(4));
+        assert_eq!(targets.target_model_slot, None);
+    }
+
+    #[test]
+    fn test_action_target_fields_add_model_counts_distinct_plus_one() {
+        let obs = vec![obs_with_model("m1"), obs_with_model("m2")];
+        let targets = action_target_fields("add_model", &obs);
+        assert_eq!(targets.target_model_slot, Some(3));
+        assert_eq!(targets.target_evaluator_slot, None);
+    }
+
+    #[test]
+    fn test_action_target_fields_request_gold_label_has_no_targets() {
+        let obs = vec![obs_with_budget(2.0), obs_with_seed(1)];
+        let targets = action_target_fields("request_gold_label", &obs);
+        assert_eq!(targets.target_budget, None);
+        assert_eq!(targets.target_seed, None);
+        assert_eq!(targets.target_evaluator_slot, None);
+        assert_eq!(targets.target_model_slot, None);
+    }
+
+    #[test]
+    fn test_action_target_fields_none_when_relevant_raw_value_absent() {
+        // suggested_action is increase_budget but none of these observations carry a budget —
+        // None (not a fabricated default), since there's no evidence to size a target from.
+        let obs = vec![obs_with_seed(1), obs_with_evaluator("e1")];
+        let targets = action_target_fields("increase_budget", &obs);
+        assert_eq!(targets.target_budget, None);
     }
 }

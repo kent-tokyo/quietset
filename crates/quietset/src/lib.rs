@@ -29,8 +29,8 @@ pub mod stream;
 pub mod weighting;
 
 pub use active_review::{
-    ActiveReviewCosts, ActiveReviewEntry, ActiveReviewWeights, RankBy, rank_active_review,
-    select_within_budget,
+    ActionTargets, ActiveReviewCosts, ActiveReviewEntry, ActiveReviewWeights, RankBy,
+    action_target_fields, rank_active_review, select_within_budget,
 };
 pub use agreement::{compute_fleiss_kappa, compute_krippendorff_alpha};
 pub use calibration::{CalibrationResult, compute_calibration};

@@ -344,6 +344,48 @@ fn active_review_plan_respects_budget_and_defaults_to_unbounded() {
 }
 
 #[test]
+fn active_review_observations_populates_target_seed_for_add_seed_action() {
+    // seed alternates 0/1 with score flipping 0.9/0.1 -> high seed_sensitivity dominates,
+    // so suggested_action is deterministically "add_seed"; max observed seed is 1.
+    let obs_text = "{\"sample_id\":\"pricey\",\"label\":\"win\",\"seed\":0,\"score\":0.9}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"seed\":1,\"score\":0.1}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"seed\":0,\"score\":0.9}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"seed\":1,\"score\":0.1}\n";
+    let obs_path = write_temp("active_review_targets_obs.jsonl", obs_text);
+
+    let scored = run(&["score", obs_path.to_str().unwrap()]);
+    assert!(scored.status.success());
+    let scored_path = write_temp("active_review_targets_scored.jsonl", &stdout(&scored));
+
+    let out = run(&["active-review", scored_path.to_str().unwrap()]);
+    assert!(out.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(stdout(&out).lines().next().unwrap()).unwrap();
+    assert_eq!(value["suggested_action"], "add_seed");
+    assert!(
+        value.get("target_seed").is_none(),
+        "target_seed should be absent without --observations"
+    );
+
+    let out_with_obs = run(&[
+        "active-review",
+        scored_path.to_str().unwrap(),
+        "--observations",
+        obs_path.to_str().unwrap(),
+    ]);
+    assert!(out_with_obs.status.success());
+    let value_with_obs: serde_json::Value =
+        serde_json::from_str(stdout(&out_with_obs).lines().next().unwrap()).unwrap();
+    assert_eq!(
+        value_with_obs["target_seed"], 2,
+        "target_seed should be max observed seed (1) + 1"
+    );
+    assert!(value_with_obs.get("target_budget").is_none());
+    assert!(value_with_obs.get("target_evaluator_slot").is_none());
+    assert!(value_with_obs.get("target_model_slot").is_none());
+}
+
+#[test]
 fn stable_wrong_risk_breakdown_off_by_default() {
     let path = gold_labeled_fixture();
     let out = run(&["stable-wrong-risk", path.to_str().unwrap()]);

@@ -10,10 +10,10 @@ use std::collections::HashMap;
 use quietset::{
     ActiveReviewCosts, ActiveReviewWeights, Decision, DecisionScore, LatentTruthSafety,
     MinRequirements, Observation, RankBy, ScoreConfig, ScoreDispersion, ScoreWeights,
-    StabilityReport, Thresholds, compute_calibration, compute_evaluator_reliability,
-    compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv, parse_jsonl, rank_active_review,
-    score_all, score_all_gold_weighted, score_all_latent_truth, score_all_weighted,
-    select_within_budget,
+    StabilityReport, Thresholds, action_target_fields, compute_calibration,
+    compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv,
+    parse_jsonl, rank_active_review, score_all, score_all_gold_weighted, score_all_latent_truth,
+    score_all_weighted, select_within_budget,
 };
 
 #[derive(Parser)]
@@ -613,6 +613,13 @@ struct ActiveReviewArgs {
     /// --plan.
     #[arg(long)]
     budget: Option<f64>,
+    /// Optional raw observation JSONL (same file `score` was run on) used to size
+    /// target_budget/target_seed/target_evaluator_slot/target_model_slot. Same rationale as
+    /// `audit --observations`: the scored input only carries derived stats, not the raw
+    /// budget/seed/evaluator/model values needed to size a concrete target. Without this,
+    /// every target_* field is omitted.
+    #[arg(long)]
+    observations: Option<String>,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -2643,7 +2650,7 @@ fn run_active_review(args: ActiveReviewArgs) -> Result<()> {
         RankByArg::Utility => RankBy::Utility,
     };
 
-    let entries = rank_active_review(
+    let mut entries = rank_active_review(
         &reports,
         &weights,
         &costs,
@@ -2651,6 +2658,27 @@ fn run_active_review(args: ActiveReviewArgs) -> Result<()> {
         args.unstable_only,
         rank_by,
     );
+
+    // target_* fields need raw budget/seed/evaluator/model values that scored StabilityReports
+    // don't carry (only derived stats), so they're only ever filled in when --observations
+    // supplies that raw data — same reasoning as `audit --observations`.
+    if let Some(path) = &args.observations {
+        let raw = read_input(path)?;
+        let obs: Vec<Observation> = parse_jsonl(&raw).context("parsing observations JSONL")?;
+        let mut by_sample: HashMap<String, Vec<Observation>> = HashMap::new();
+        for o in obs {
+            by_sample.entry(o.sample_id.clone()).or_default().push(o);
+        }
+        for e in &mut entries {
+            if let Some(sample_obs) = by_sample.get(&e.sample_id) {
+                let targets = action_target_fields(e.suggested_action, sample_obs);
+                e.target_budget = targets.target_budget;
+                e.target_seed = targets.target_seed;
+                e.target_evaluator_slot = targets.target_evaluator_slot;
+                e.target_model_slot = targets.target_model_slot;
+            }
+        }
+    }
 
     let take = args.top.unwrap_or(entries.len());
     for e in entries.iter().take(take) {
@@ -2704,5 +2732,17 @@ fn active_review_entry_json(e: &quietset::ActiveReviewEntry) -> serde_json::Valu
     );
     obj.insert("cost".into(), serde_json::json!(e.cost));
     obj.insert("utility".into(), serde_json::json!(e.utility));
+    if let Some(v) = e.target_budget {
+        obj.insert("target_budget".into(), serde_json::json!(v));
+    }
+    if let Some(v) = e.target_seed {
+        obj.insert("target_seed".into(), serde_json::json!(v));
+    }
+    if let Some(v) = e.target_evaluator_slot {
+        obj.insert("target_evaluator_slot".into(), serde_json::json!(v));
+    }
+    if let Some(v) = e.target_model_slot {
+        obj.insert("target_model_slot".into(), serde_json::json!(v));
+    }
     serde_json::Value::Object(obj)
 }
