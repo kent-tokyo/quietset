@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0 — 2026-07-04
+
 ### Added
 - `DecisionScore::GoldWeighted` / `--decision-score gold-weighted` — drives `stability_score`/
   `decision` from a gold-label-reliability-weighted label vote in place of raw majority
