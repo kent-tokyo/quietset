@@ -243,7 +243,7 @@ It is the **weighted mean** of available sub-scores (all in `[0.0, 1.0]`):
 | `seed_robustness` | `1 - seed_sensitivity` |
 | `model_agreement` | label agreement across models |
 | `evaluator_agreement` | label agreement across evaluators |
-| `score_sign_agreement` | fraction of numeric scores sharing the majority sign — weight defaults to `0` (excluded); opt in with `--weight-score-sign` |
+| `score_sign_agreement` | fraction of numeric scores sharing the majority sign — weight defaults to `0` (excluded); opt in with `--weight-score-sign` (`--profile game-ai` enables it at `×2` by default) |
 
 Missing dimensions (e.g. no labels, no budgets) are excluded from the mean.
 Single observations receive `stability_score = 0.5` (review by default).
@@ -257,7 +257,7 @@ Additional diagnostic fields on `StabilityReport`:
 | `label_agreement_lcb` | Wilson confidence interval lower bound of `label_agreement`. More conservative than raw `label_agreement` — guards against low-n coincidences. |
 | `score_mad` | Median absolute deviation of numeric scores. More robust to outliers than `score_std`. |
 | `score_iqr` | Interquartile range (Q3 − Q1) of numeric scores. |
-| `score_sign_agreement` | Fraction of numeric scores sharing the majority sign (negative / zero / positive). Domain-aware complement to `score_std`/`score_mad`/`score_iqr` for signed, zero-centered scores (chess/shogi-style eval): `[+0.01, -0.01]` reads as near-perfectly stable by magnitude alone but is a coin-flip on sign. Always computed but excluded from `stability_score` by default (`--weight-score-sign 0`); pass `--weight-score-sign <f>` to make it contribute. |
+| `score_sign_agreement` | Fraction of numeric scores sharing the majority sign (negative / zero / positive). Domain-aware complement to `score_std`/`score_mad`/`score_iqr` for signed, zero-centered scores (chess/shogi-style eval): `[+0.01, -0.01]` reads as near-perfectly stable by magnitude alone but is a coin-flip on sign. Always computed but excluded from `stability_score` by default (`--weight-score-sign 0`); pass `--weight-score-sign <f>` to make it contribute. `--profile game-ai` enables it at `×2` by default — for every other profile, this stays a purely informational field unless explicitly weighted. |
 | `budget_slope` | Score trend as budget increases (positive = converges upward) |
 | `confidence` | `n / (n + k)` — how much to trust the score given evidence count |
 | `adjusted_stability_score` | `stability * confidence + 0.5 * (1 - confidence)` |
@@ -290,7 +290,7 @@ Apply a use-case preset with `--profile` instead of tuning weights manually. Exp
 |---------|---------------|----------------------|
 | `llm-judge` | evaluator ×2, model ×2 | `lcb` |
 | `simulation` | budget ×2, seed ×2 | `adjusted` |
-| `game-ai` | budget ×2, seed ×2; min-observations 4, min-budgets 2, min-seeds 2, min-evaluators 2 | `lcb` |
+| `game-ai` | budget ×2, seed ×2, score_sign ×2; min-observations 4, min-budgets 2, min-seeds 2, min-evaluators 2 | `lcb` |
 | `benchmark` | label ×2, evaluator ×1.5 | `raw` |
 
 ```bash
@@ -342,9 +342,21 @@ By default, decisions use `stability_score`. Five decision modes are available:
 | `--decision-score adjusted` | `--use-adjusted-score` | `adjusted_stability_score` | Penalises low-evidence samples proportionally. |
 | `--decision-score lcb` | `--use-lcb-score` | `label_agreement_lcb` (label) | Wilson LCB — most conservative. A 2/2 label match gives LCB ≈ 0.34 at 95% confidence, so it will not be kept without more evidence. |
 | `--decision-score gold-weighted` | — | `stability_score` (label component reliability-weighted) | Replaces the raw majority label vote with a `gold_label`-reliability-weighted vote. Falls back to identical behaviour as `raw` when no `gold_label` is present anywhere in the input. |
-| `--decision-score latent-truth` | — | `stability_score` (label component EM-weighted) | Replaces the raw majority label vote with a Dawid-Skene EM-estimated vote — infers per-evaluator reliability from disagreement patterns alone, no `gold_label` required. Falls back to identical behaviour as `raw` when the input has fewer than 2 distinct evaluators or labels. Adds `latent_truth_label`, `latent_truth_confidence`, `latent_truth_label_distribution`, `majority_latent_conflict`, `evaluator_effective_n`, `correlated_evaluator_warning`, `latent_truth_converged`, `latent_truth_iterations`, `latent_truth_convergence_delta` to the output. `latent_truth_confidence` is EM's fitted posterior, which saturates toward 0/1 with only a few evaluators and can be confidently wrong when evaluators are correlated in their bias — it is not a correctness guarantee. `evaluator_effective_n`/`correlated_evaluator_warning` diagnose that same risk (Kish design effect on pairwise-correlated evaluator errors) but can only detect it when *other* evaluators reveal a correlated block's shared deviation — if the block captures the EM consensus outright, no warning fires; it's a self-consistency diagnostic, not an independent correctness check. `latent_truth_converged` is false when the EM loop exhausted its iteration cap without settling (`latent_truth_iterations` hits the cap, `latent_truth_convergence_delta` stays above the convergence epsilon) — the posterior is still valid but less certain; the same value applies to every sample scored in that batch, since EM runs once per batch. |
+| `--decision-score latent-truth` | — | `stability_score` (label component EM-weighted) | Replaces the raw majority label vote with a Dawid-Skene EM-estimated vote — infers per-evaluator reliability from disagreement patterns alone, no `gold_label` required. Falls back to identical behaviour as `raw` when the input has fewer than 2 distinct evaluators or labels. Adds `latent_truth_label`, `latent_truth_confidence`, `latent_truth_label_distribution`, `majority_latent_conflict`, `evaluator_effective_n`, `correlated_evaluator_warning`, `latent_truth_converged`, `latent_truth_iterations`, `latent_truth_convergence_delta`, `latent_truth_demotion_reason` to the output. `latent_truth_confidence` is EM's fitted posterior, which saturates toward 0/1 with only a few evaluators and can be confidently wrong when evaluators are correlated in their bias — it is not a correctness guarantee. `evaluator_effective_n`/`correlated_evaluator_warning` diagnose that same risk (Kish design effect on pairwise-correlated evaluator errors) but can only detect it when *other* evaluators reveal a correlated block's shared deviation — if the block captures the EM consensus outright, no warning fires; it's a self-consistency diagnostic, not an independent correctness check. `latent_truth_converged` is false when the EM loop exhausted its iteration cap without settling (`latent_truth_iterations` hits the cap, `latent_truth_convergence_delta` stays above the convergence epsilon) — the posterior is still valid but less certain; the same value applies to every sample scored in that batch, since EM runs once per batch. |
 
-`MinRequirements` are always applied **after** the threshold comparison.
+`MinRequirements` are always applied **after** the threshold comparison. For
+`--decision-score latent-truth`, three additional opt-in, default-off safety demotions apply
+after that: `--demote-on-correlated-warning` (demotes when `correlated_evaluator_warning`
+fires), `--min-evaluator-effective-n <f64>` (demotes when `evaluator_effective_n` falls below
+this absolute value, independent of the relative 70%-of-nominal warning above), and
+`--demote-on-non-convergence` (demotes when `latent_truth_converged` is false). Each only ever
+demotes `Keep` → `Review` — never further to `Drop`, since these are uncertainty signals, not
+certainty-of-wrongness signals — and never touches `stability_score` itself. When a demotion
+fires, `latent_truth_demotion_reason` names which condition (`correlated_evaluator_warning`,
+`evaluator_effective_n_below_minimum`, or `latent_truth_not_converged`, in that priority order
+if more than one fires at once). Available on `score` and `stable-wrong-risk`; no-op on
+`calibrate`/`policy`/`compare --policy-after`, which compare raw scores directly rather than
+reading `decision`.
 
 | Condition | Decision |
 |-----------|----------|
@@ -653,7 +665,10 @@ input already claims stdin. Requires `gold_label` on the held-out file, or the c
 The reported precision can legitimately land *below* `--target-precision` when the
 primary-input-selected threshold overfits — that's the correct, honest signal, not a bug.
 `validated_on_heldout` in the output discloses whether `--heldout` was used, so a saved result
-still says what it measured:
+still says what it measured. `train_precision` exposes the in-sample precision at the same
+threshold alongside `achieved_precision` (which becomes the held-out precision once `--heldout`
+is used) — `null` unless `--heldout` was given, since otherwise it would just repeat
+`achieved_precision`:
 
 ```bash
 quietset calibrate input.jsonl --target-precision 0.95 --heldout heldout_gold.jsonl
@@ -669,8 +684,9 @@ quietset calibrate input.jsonl --target-precision 0.95 --heldout heldout_gold.js
   "coverage": 1.0,
   "n_keep": 24,
   "n_total": 24,
+  "train_precision": 0.97,
   "validated_on_heldout": true,
-  "note": null
+  "note": "in-sample precision at this threshold was 0.970, held-out precision is 0.710 (gap 0.260) — the training-selected threshold likely overfit the training gold labels"
 }
 ```
 
@@ -680,8 +696,20 @@ Use `--output-format csv` for a single header row + one data row instead of a JS
 quietset calibrate input.jsonl --target-precision 0.95 --output-format csv
 ```
 ```csv
-decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,validated_on_heldout,note
-lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
+decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note
+lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
+```
+
+Use `--fail-below-target` to make `calibrate` a CI gate: it exits non-zero (after still printing
+the result) if `achieved_precision` falls short of `--target-precision`. Without `--heldout`
+this is effectively a no-op — the grid search already guarantees `achieved_precision >=
+--target-precision` on the primary input, or fails outright with an error. With `--heldout`,
+`achieved_precision` is the held-out measurement, which can legitimately fall short — this flag
+turns that honest signal into something a CI pipeline can act on:
+
+```bash
+quietset calibrate train.jsonl --heldout heldout.jsonl --target-precision 0.98 --fail-below-target
+echo "exit code: $?"
 ```
 
 > **Note:** calibrate cannot separate stable-correct from stable-wrong samples — if a sample
@@ -760,6 +788,36 @@ quietset stable-wrong-risk input.jsonl --keep-threshold 0.90
 
 Requires `gold_label` on observations. Sorted by `stability_score` descending — the most
 confidently-kept wrong samples appear first. Use `--top N` to limit the sample list.
+
+Use `--breakdown` to also report `stable_wrong_rate` per `evaluator_id`/`model_id`/`budget`
+value among `Keep`-decision samples — spotting a specific evaluator/model/budget that shows up
+disproportionately often in stably-wrong-but-kept samples:
+
+```bash
+quietset stable-wrong-risk input.jsonl --breakdown
+```
+```json
+{
+  "n_total": 1000,
+  "n_keep": 621,
+  "n_stable_wrong": 12,
+  "stable_wrong_rate_among_keep": 0.019,
+  "samples": [ ... ],
+  "by_evaluator": [
+    {"evaluator_id": "m1", "n_keep": 340, "n_stable_wrong": 9, "stable_wrong_rate": 0.026},
+    {"evaluator_id": "m2", "n_keep": 281, "n_stable_wrong": 3, "stable_wrong_rate": 0.011}
+  ],
+  "by_model": [ ... ],
+  "by_budget": [ ... ]
+}
+```
+
+Each breakdown is sample-level, like the top-level rate: `by_evaluator[i].n_keep` counts `Keep`
+samples that touch that specific `evaluator_id`, not observations. A sample can touch multiple
+evaluators/models/budgets at once, so rows within a breakdown do **not** sum to the top-level
+`n_keep` — that's intentional, not a partition; it answers "which evaluators/models/budgets show
+up in wrong-but-confident samples," not "whose fault is it." Off by default, since it clones the
+input and does an extra grouping pass.
 
 ## compare --policy-after
 
@@ -870,6 +928,21 @@ feed only `label_agreement_flip_ratio` and the at-risk-keep gate — they do not
 `decision`. `--rank-by urgency` (default) sorts by `urgency_score`; `--rank-by utility` sorts by
 `utility` instead, surfacing samples where additional review effort pays off most rather than
 samples that merely look unstable.
+
+Use `--plan <path>` to write a budget-constrained evaluation plan — a JSONL file, always sorted
+by `utility` descending regardless of `--rank-by`, in addition to the normal stdout output.
+`--budget <f64>` caps the total `cost` of entries it includes: entries are taken greedily by
+utility, skipping (not stopping at) any that don't fit so a cheaper lower-utility entry later in
+the list can still be included. Without `--budget`, `--plan` writes every entry (still
+utility-sorted):
+
+```bash
+quietset active-review scored.jsonl --plan next_eval_plan.jsonl --budget 20.0
+```
+
+This is a standard greedy value-density approximation for a knapsack-style budget allocation
+problem — not guaranteed globally optimal, but sound for "what should the next batch of review
+effort go toward."
 
 ## Rust API
 

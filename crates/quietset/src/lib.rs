@@ -24,21 +24,29 @@ pub mod latent_truth;
 pub mod observation;
 pub mod schema;
 pub mod scoring;
+pub mod stable_wrong;
 pub mod stream;
 pub mod weighting;
 
 pub use active_review::{
     ActiveReviewCosts, ActiveReviewEntry, ActiveReviewWeights, RankBy, rank_active_review,
+    select_within_budget,
 };
 pub use agreement::{compute_fleiss_kappa, compute_krippendorff_alpha};
 pub use calibration::{CalibrationResult, compute_calibration};
-pub use config::{DecisionScore, MinRequirements, ScoreConfig, ScoreDispersion, ScoreWeights};
+pub use config::{
+    DecisionScore, LatentTruthSafety, MinRequirements, ScoreConfig, ScoreDispersion, ScoreWeights,
+};
 pub use decision::Thresholds;
 pub use error::{Error, Result};
 pub use latent_truth::{LatentTruthEstimate, compute_latent_truth};
 pub use observation::{Observation, parse_csv, parse_jsonl};
 pub use schema::{Decision, StabilityComponents, StabilityReport};
 pub use scoring::{compute_report, score_all};
+pub use stable_wrong::{
+    BudgetStableWrongRate, EvaluatorStableWrongRate, ModelStableWrongRate, StableWrongBreakdown,
+    stable_wrong_breakdown,
+};
 pub use stream::StreamingScorer;
 pub use weighting::{
     compute_evaluator_label_weights, compute_evaluator_reliability, compute_evaluator_weights,
@@ -180,6 +188,15 @@ pub fn score_all_latent_truth(
             report.latent_truth_converged = Some(estimate.converged);
             report.latent_truth_iterations = Some(estimate.iterations);
             report.latent_truth_convergence_delta = Some(estimate.convergence_delta);
+            if report.decision == Decision::Keep
+                && let Some(reason) = latent_truth::latent_truth_demotion_reason(
+                    estimate,
+                    &config.latent_truth_safety,
+                )
+            {
+                report.decision = Decision::Review;
+                report.latent_truth_demotion_reason = Some(reason.to_string());
+            }
         }
     }
     reports

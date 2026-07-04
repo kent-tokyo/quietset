@@ -366,3 +366,52 @@ signal (weight 1.0 on it, 0.0 on the rest) and asserting the actual `primary_rea
 `suggested_action` pair the function returns. General pattern: a test with no call into the
 code under test is not a regression guard, no matter how reasonable its assertion looks in
 isolation.
+
+## "Hand-built example JSON must satisfy its own formula" bit twice — the lesson needed a mechanical fix, not just a restated warning
+
+The Phase 17 lesson above (active-review's `utility: 0.033` vs. the correct `0.0139`) restated
+as prose apparently didn't stick: Phase 18's `calibrate --heldout` README example shipped with
+`train_precision: 0.97`, `achieved_precision: 0.71`, `note: null` — but the documented rule
+(`gap = train_precision - achieved_precision > 0.05` ⇒ `note` is the overfit-warning string)
+means `gap = 0.26 > 0.05`, so `note` could never legitimately be `null` there. Caught by an
+advisor pass, not self-review, same as last time. Two bugs of the identical shape in one project
+means "remember to double-check" isn't a sufficient fix. Going forward: any hand-typed doc
+example with a value derived from a documented if/else or formula gets that branch actually
+evaluated by hand (or, better, the example is pasted from real CLI output) before it's treated
+as done — do not rely on "looks plausible" as the checkpoint.
+
+## Reusing a function's return type across a new module is a compile-time check, not a design risk
+
+`stable_wrong_breakdown()` was designed to consume `group_by_sample_id`'s output directly, but
+its first-draft signature declared `&HashMap<String, Vec<Observation>>` — the actual return type
+is `IndexMap<String, Vec<Observation>>` (`crate::group::group_by_sample_id`). The compiler caught
+every call site immediately (the function signature plus 5 test fixtures using
+`HashMap::new()`); fixed by changing the signature to `&IndexMap<...>` and updating the fixtures
+via `replace_all`. Lesson: when a design doc says "reuse function X's output," grep X's actual
+return type before writing the signature — Rust's type checker makes the mismatch cheap to catch
+but only after code is written; checking first avoids the churn.
+
+## "Probe-then-finalize" is the reliable way to build EM/statistically-derived test fixtures aimed at a target decision
+
+Building a fixture meant to sit at baseline `Keep` before testing a demotion flag, the first
+attempt (a single target sample plus 3 brand-new evaluators with no other supporting data) came
+back `Review` — EM confidence was only 0.764 against the default 0.85 keep threshold, since 3
+evaluators appearing once each carry too little fitted-reliability evidence. Rather than
+guessing at parameters, a throwaway `eprintln!`-based probe test was run first to observe the
+actual EM output, then the fixture was adjusted (5 additional supporting samples reusing the
+same 3 evaluators, raising confidence to 0.9795) and only then were real assertions locked in.
+This is the second time this exact probe-then-finalize sequence was needed for an EM-based
+fixture in this project (the first was Phase 17's latent-truth convergence iteration counts) —
+worth treating as the default approach for any new fixture whose target is a statistically-fit
+outcome rather than a hand-computed one.
+
+## A previously-deliberate "don't touch this default" decision is not permanent once the user asks for it by name
+
+Phase 16 deliberately left `--profile game-ai`'s weights untouched when `score_sign_agreement`
+shipped, reasoning that changing an existing profile's default `stability_score` would silently
+break existing users. Phase 18's external review re-proposed the same change; rather than
+re-rejecting it on the old reasoning, it was scoped via AskUserQuestion and the user explicitly
+chose "enable it" for the game-ai profile specifically. Same pattern already logged for held-out
+calibration (deferred in one cycle, built when asked by name in a later one) and EV-active-review
+— a deliberate non-change made for backward-compat reasons is a default, not a permanent ban;
+what makes it permanent is the absence of a direct ask, not the original reasoning.

@@ -1,9 +1,10 @@
 use quietset::{
-    Decision, DecisionScore, MinRequirements, Observation, ScoreConfig, ScoreDispersion,
-    ScoreWeights, Thresholds, compute_calibration, compute_evaluator_label_weights,
-    compute_evaluator_reliability, compute_evaluator_weights, compute_fleiss_kappa,
-    compute_krippendorff_alpha, compute_weighted_majority, compute_weighted_majority_by_label,
-    parse_jsonl, score_all, score_all_gold_weighted, score_all_latent_truth, score_all_weighted,
+    Decision, DecisionScore, LatentTruthSafety, MinRequirements, Observation, ScoreConfig,
+    ScoreDispersion, ScoreWeights, StabilityReport, Thresholds, compute_calibration,
+    compute_evaluator_label_weights, compute_evaluator_reliability, compute_evaluator_weights,
+    compute_fleiss_kappa, compute_krippendorff_alpha, compute_weighted_majority,
+    compute_weighted_majority_by_label, parse_jsonl, score_all, score_all_gold_weighted,
+    score_all_latent_truth, score_all_weighted,
 };
 
 fn load(filename: &str) -> Vec<quietset::Observation> {
@@ -1275,6 +1276,11 @@ fn test_calibrate_heldout_precision_differs_from_training() {
         note.contains("0.900") && note.contains("0.200"),
         "note should name both the in-sample and held-out precision: {note}"
     );
+    assert!(
+        (result.train_precision.expect("heldout was used") - 0.90).abs() < 1e-9,
+        "train_precision should be the in-sample 9/10 ratio, got {:?}",
+        result.train_precision
+    );
 }
 
 #[test]
@@ -1294,6 +1300,10 @@ fn test_calibrate_no_heldout_note_always_present() {
         .note
         .expect("achieved_precision without --heldout is always in-sample optimistic");
     assert!(note.contains("--heldout"));
+    assert!(
+        result.train_precision.is_none(),
+        "train_precision is only populated when --heldout is used"
+    );
 }
 
 #[test]
@@ -1857,8 +1867,10 @@ fn test_latent_truth_ignores_gold_label() {
 #[test]
 fn test_game_ai_profile_uses_lcb_and_stricter_mins() {
     // Verify game-ai profile config values (test the library-level config, not CLI)
-    // In the CLI, game-ai sets: budget_stability×2, seed_stability×2, min_obs=4, min_budgets=2,
-    // min_seeds=2, min_evaluators=2, lcb. We replicate that config here directly.
+    // In the CLI, game-ai sets: budget_stability×2, seed_stability×2, score_sign×2, min_obs=4,
+    // min_budgets=2, min_seeds=2, min_evaluators=2, lcb. We replicate the budget/seed/min part
+    // of that config here directly (score_sign is omitted since this fixture has no negative
+    // scores to flip sign on, so it wouldn't change this test's outcome either way).
     let config = ScoreConfig {
         weights: ScoreWeights {
             budget_stability: 2.0,
@@ -2131,4 +2143,215 @@ fn test_score_all_panics_on_non_finite_score_bypassing_parser() {
         ..Default::default()
     }];
     let _ = score_all(obs, &ScoreConfig::default());
+}
+
+// Fixture shared by the correlated-warning and min-effective-n demotion tests below: 3
+// reliable evaluators (R1-R3) + 2 evaluators (TW1, TW2) identical to each other (correct on
+// the first half of training samples, both wrong together on the second half). Target sample
+// "s" has one reliable evaluator + both twins -- baseline (all safety flags off) is
+// decision=Keep, evaluator_effective_n≈1.8, correlated_evaluator_warning=true, converged=true.
+// See latent_truth.rs's test_correlated_evaluators_lower_effective_n_and_warn for the same
+// fixture at the compute_latent_truth level.
+fn correlated_twins_fixture() -> Vec<Observation> {
+    let mut obs = Vec::new();
+    let training = [
+        ("t1", "win"),
+        ("t2", "loss"),
+        ("t3", "win"),
+        ("t4", "loss"),
+        ("t5", "win"),
+        ("t6", "loss"),
+    ];
+    for (i, (id, truth)) in training.iter().enumerate() {
+        let opposite = if *truth == "win" { "loss" } else { "win" };
+        for eval in ["R1", "R2", "R3"] {
+            obs.push(Observation {
+                sample_id: (*id).into(),
+                label: Some((*truth).to_string()),
+                evaluator_id: Some(eval.into()),
+                ..Default::default()
+            });
+        }
+        let twin_label = if i < 3 { *truth } else { opposite };
+        for eval in ["TW1", "TW2"] {
+            obs.push(Observation {
+                sample_id: (*id).into(),
+                label: Some(twin_label.to_string()),
+                evaluator_id: Some(eval.into()),
+                ..Default::default()
+            });
+        }
+    }
+    for (eval, label) in [("R1", "win"), ("TW1", "loss"), ("TW2", "loss")] {
+        obs.push(Observation {
+            sample_id: "s".into(),
+            label: Some(label.into()),
+            evaluator_id: Some(eval.into()),
+            ..Default::default()
+        });
+    }
+    obs
+}
+
+fn score_correlated_twins(safety: LatentTruthSafety) -> StabilityReport {
+    let weights = ScoreWeights {
+        evaluator_agreement: 0.0,
+        ..ScoreWeights::default()
+    };
+    let reports = score_all_latent_truth(
+        correlated_twins_fixture(),
+        &ScoreConfig {
+            weights,
+            decision_score: DecisionScore::LatentTruth,
+            latent_truth_safety: safety,
+            ..ScoreConfig::default()
+        },
+    );
+    reports.into_iter().find(|r| r.sample_id == "s").unwrap()
+}
+
+#[test]
+fn test_latent_truth_demotes_keep_on_correlated_warning() {
+    let s = score_correlated_twins(LatentTruthSafety {
+        demote_on_correlated_warning: true,
+        ..Default::default()
+    });
+    assert_eq!(s.decision, Decision::Review);
+    assert_eq!(
+        s.latent_truth_demotion_reason.as_deref(),
+        Some("correlated_evaluator_warning")
+    );
+}
+
+#[test]
+fn test_latent_truth_correlated_warning_off_by_default_locks_backward_compat() {
+    let s = score_correlated_twins(LatentTruthSafety::default());
+    assert_eq!(
+        s.decision,
+        Decision::Keep,
+        "with all safety flags off (the default), decision must be unaffected"
+    );
+    assert!(s.latent_truth_demotion_reason.is_none());
+}
+
+#[test]
+fn test_latent_truth_demotes_keep_on_min_effective_n() {
+    // s.evaluator_effective_n is ~1.8 (see test_correlated_evaluators_lower_effective_n_and_warn);
+    // a minimum of 2.0 is comfortably above that.
+    let s = score_correlated_twins(LatentTruthSafety {
+        min_evaluator_effective_n: Some(2.0),
+        ..Default::default()
+    });
+    assert_eq!(s.decision, Decision::Review);
+    assert_eq!(
+        s.latent_truth_demotion_reason.as_deref(),
+        Some("evaluator_effective_n_below_minimum")
+    );
+}
+
+#[test]
+fn test_latent_truth_min_effective_n_off_by_default_locks_backward_compat() {
+    let s = score_correlated_twins(LatentTruthSafety {
+        min_evaluator_effective_n: None,
+        ..Default::default()
+    });
+    assert_eq!(s.decision, Decision::Keep);
+    assert!(s.latent_truth_demotion_reason.is_none());
+}
+
+#[test]
+fn test_latent_truth_demotion_priority_order() {
+    // Both demote_on_correlated_warning and min_evaluator_effective_n fire for "s" ->
+    // correlated_evaluator_warning wins (higher priority).
+    let s = score_correlated_twins(LatentTruthSafety {
+        demote_on_correlated_warning: true,
+        min_evaluator_effective_n: Some(2.0),
+        demote_on_non_convergence: false,
+    });
+    assert_eq!(s.decision, Decision::Review);
+    assert_eq!(
+        s.latent_truth_demotion_reason.as_deref(),
+        Some("correlated_evaluator_warning")
+    );
+}
+
+// Fixture for non-convergence demotion tests: an adversarial-tie batch (guaranteed
+// converged=false at the iteration cap, same shape as
+// latent_truth.rs's test_compute_latent_truth_adversarial_tie_hits_iteration_cap) plus a
+// disjoint-evaluator "clean" sample with several unanimous supporting samples reinforcing its
+// evaluators' reliability. Because `converged` is one shared value per EM run, "clean" inherits
+// converged=false even though its own posterior is confidently decided (baseline: Keep). The
+// adversarial samples themselves stay Review/Drop already (never Keep), so the Keep->Review-only
+// demotion doesn't touch them.
+fn non_convergence_fixture() -> Vec<Observation> {
+    let mut obs = Vec::new();
+    for s in 0..6 {
+        let sample_id = format!("adv{s}");
+        for e in 0..4 {
+            let label = if (s + e) % 2 == 0 { "a" } else { "b" };
+            obs.push(Observation {
+                sample_id: sample_id.clone(),
+                label: Some(label.to_string()),
+                evaluator_id: Some(format!("eval{e}")),
+                ..Default::default()
+            });
+        }
+    }
+    for i in 0..6 {
+        let sample_id = if i == 0 {
+            "clean".to_string()
+        } else {
+            format!("clean_support{i}")
+        };
+        for eval in ["clean0", "clean1", "clean2"] {
+            obs.push(Observation {
+                sample_id: sample_id.clone(),
+                label: Some("a".into()),
+                evaluator_id: Some(eval.into()),
+                ..Default::default()
+            });
+        }
+    }
+    obs
+}
+
+fn score_non_convergence(safety: LatentTruthSafety) -> StabilityReport {
+    let weights = ScoreWeights {
+        evaluator_agreement: 0.0,
+        ..ScoreWeights::default()
+    };
+    let reports = score_all_latent_truth(
+        non_convergence_fixture(),
+        &ScoreConfig {
+            weights,
+            decision_score: DecisionScore::LatentTruth,
+            latent_truth_safety: safety,
+            ..ScoreConfig::default()
+        },
+    );
+    reports
+        .into_iter()
+        .find(|r| r.sample_id == "clean")
+        .unwrap()
+}
+
+#[test]
+fn test_latent_truth_demotes_keep_on_non_convergence() {
+    let clean = score_non_convergence(LatentTruthSafety {
+        demote_on_non_convergence: true,
+        ..Default::default()
+    });
+    assert_eq!(clean.latent_truth_converged, Some(false));
+    assert_eq!(clean.decision, Decision::Review);
+    assert_eq!(
+        clean.latent_truth_demotion_reason.as_deref(),
+        Some("latent_truth_not_converged")
+    );
+}
+
+#[test]
+fn test_latent_truth_non_convergence_off_by_default_locks_backward_compat() {
+    let clean = score_non_convergence(LatentTruthSafety::default());
+    assert_eq!(clean.decision, Decision::Keep);
+    assert!(clean.latent_truth_demotion_reason.is_none());
 }

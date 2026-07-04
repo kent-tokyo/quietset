@@ -268,6 +268,32 @@ pub fn rank_active_review(
     entries
 }
 
+/// Greedily select entries by utility descending, within a total `budget`: entries are
+/// scanned in utility order and taken whenever their `cost` still fits the remaining budget
+/// (skipping — not stopping at — one that doesn't fit, so a cheaper lower-utility entry later
+/// in the list can still be included). A standard greedy approximation for the knapsack-style
+/// problem of maximizing total utility under a cost constraint; not guaranteed globally
+/// optimal, but sound for ranking "what to spend review budget on next." Independent of
+/// whatever order `entries` arrived in — always re-sorts by utility internally.
+pub fn select_within_budget(entries: &[ActiveReviewEntry], budget: f64) -> Vec<ActiveReviewEntry> {
+    let mut sorted: Vec<&ActiveReviewEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.utility
+            .partial_cmp(&a.utility)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.sample_id.cmp(&b.sample_id))
+    });
+    let mut remaining = budget;
+    let mut selected = Vec::new();
+    for e in sorted {
+        if e.cost <= remaining {
+            remaining -= e.cost;
+            selected.push(e.clone());
+        }
+    }
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +695,60 @@ mod tests {
             5,
             "all five signals must map to distinct suggested_action strings"
         );
+    }
+
+    fn dummy_entry(sample_id: &str, utility: f64, cost: f64) -> ActiveReviewEntry {
+        ActiveReviewEntry {
+            sample_id: sample_id.into(),
+            urgency_score: 0.0,
+            primary_reason: "low_lcb",
+            suggested_action: "request_gold_label",
+            label_agreement_lcb: None,
+            label_entropy: None,
+            budget_sensitivity: None,
+            seed_sensitivity: None,
+            label_agreement_flip_ratio: None,
+            expected_coverage_gain: 0.0,
+            expected_risk_reduction: 0.0,
+            cost,
+            utility,
+        }
+    }
+
+    #[test]
+    fn test_select_within_budget_skips_unaffordable_and_continues_scanning() {
+        // Sorted by utility desc: C(0.9,5.0), A(0.5,2.0), B(0.3,1.0). Budget=6.0: take C
+        // (remaining 1.0), skip A (2.0 > 1.0, doesn't stop scanning), take B (1.0 <= 1.0).
+        let entries = vec![
+            dummy_entry("a", 0.5, 2.0),
+            dummy_entry("b", 0.3, 1.0),
+            dummy_entry("c", 0.9, 5.0),
+        ];
+        let selected = select_within_budget(&entries, 6.0);
+        let ids: Vec<&str> = selected.iter().map(|e| e.sample_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["c", "b"],
+            "should take the highest-utility affordable entry, skip the one that doesn't fit, \
+             and keep scanning for a cheaper one that does"
+        );
+    }
+
+    #[test]
+    fn test_select_within_budget_unbounded_includes_everything_sorted_by_utility() {
+        let entries = vec![
+            dummy_entry("a", 0.5, 2.0),
+            dummy_entry("b", 0.3, 1.0),
+            dummy_entry("c", 0.9, 5.0),
+        ];
+        let selected = select_within_budget(&entries, f64::INFINITY);
+        let ids: Vec<&str> = selected.iter().map(|e| e.sample_id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn test_select_within_budget_zero_budget_selects_nothing() {
+        let entries = vec![dummy_entry("a", 0.5, 2.0)];
+        assert!(select_within_budget(&entries, 0.0).is_empty());
     }
 }

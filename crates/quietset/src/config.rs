@@ -101,6 +101,30 @@ impl Default for ScoreWeights {
     }
 }
 
+/// Opt-in safety demotions for `DecisionScore::LatentTruth`: let latent-truth EM diagnostics
+/// (`evaluator_effective_n`, `correlated_evaluator_warning`, `converged`) optionally demote a
+/// would-be `Keep` decision down to `Review` — never to `Drop`, since these are uncertainty
+/// signals, not certainty-of-wrongness signals. All fields default to off/`None`, so every
+/// existing caller who doesn't touch this struct sees identical `decision` output to before
+/// this feature shipped. Has no effect unless `ScoreConfig::decision_score` is
+/// `DecisionScore::LatentTruth` — every other decision score leaves the underlying
+/// diagnostics `None` on the report, so there is nothing to demote against.
+#[derive(Debug, Clone, Default)]
+pub struct LatentTruthSafety {
+    /// Demote Keep → Review when `correlated_evaluator_warning` is true (effective_n below
+    /// 70% of nominal). Default `false` (off).
+    pub demote_on_correlated_warning: bool,
+    /// Demote Keep → Review when `evaluator_effective_n` falls below this absolute minimum,
+    /// regardless of nominal evaluator count. Independent of
+    /// `demote_on_correlated_warning`'s relative 70%-of-nominal ratio — e.g. `Some(2.0)`
+    /// requires "at least 2.0 effective evaluators" even where that's above 70% of a small
+    /// nominal count. Default `None` (off, no minimum).
+    pub min_evaluator_effective_n: Option<f64>,
+    /// Demote Keep → Review when the latent-truth EM loop did not converge before its
+    /// iteration cap. Default `false` (off).
+    pub demote_on_non_convergence: bool,
+}
+
 /// Configuration for [`score_all`](crate::score_all) and [`compute_report`](crate::compute_report).
 pub struct ScoreConfig {
     /// Denominator for normalising `score_std` and sensitivity metrics into `[0.0, 1.0]`.
@@ -120,6 +144,8 @@ pub struct ScoreConfig {
     pub score_dispersion: ScoreDispersion,
     /// Confidence level for Wilson LCB. Default 0.95.
     pub confidence_level: f64,
+    /// Opt-in safety demotions for `DecisionScore::LatentTruth`. All off by default.
+    pub latent_truth_safety: LatentTruthSafety,
 }
 
 impl Default for ScoreConfig {
@@ -133,6 +159,7 @@ impl Default for ScoreConfig {
             decision_score: DecisionScore::Raw,
             score_dispersion: ScoreDispersion::Std,
             confidence_level: 0.95,
+            latent_truth_safety: LatentTruthSafety::default(),
         }
     }
 }
@@ -195,6 +222,13 @@ impl ScoreConfig {
             == 0.0
         {
             return Err(crate::error::Error::AllWeightsZero);
+        }
+        if let Some(min_n) = self.latent_truth_safety.min_evaluator_effective_n
+            && (!min_n.is_finite() || min_n <= 0.0)
+        {
+            return Err(crate::error::Error::InvalidThreshold(format!(
+                "min_evaluator_effective_n ({min_n}) must be > 0.0 and finite"
+            )));
         }
         Ok(())
     }

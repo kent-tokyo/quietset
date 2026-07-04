@@ -275,3 +275,60 @@ request, same "deferred has an expiration condition" pattern as Phase 16's held-
   new flags) and latent-truth Decisions-table row extended; CHANGELOG Added + Changed(breaking)
   entries
 - [x] cargo build --workspace --all-targets + test (18+78+11+2) + clippy -D warnings + fmt clean
+
+## Phase 18: LatentTruth safety demotion, calibrate CI-gate, stable-wrong-risk breakdown, active-review plan output, game-ai score_sign default (done)
+
+A fourth large external review re-proposed most of the same rejected 14-item roadmap again
+(policy-file TOML rejected 2x, schema_version rejected, `--profile shogi`/mate_score_consistency
+rejected as domain-specific per `AGENTS.md` non-goals) plus repeated stale claims (README_ja.md
+profile-table staleness — verified byte-identical; crates.io "0.8.0" — verified 0.11.0). Five
+items were genuinely new or newly-actionable, confirmed via AskUserQuestion — including
+reversing Phase 16's deliberate choice not to touch `--profile game-ai`'s defaults, since the
+user explicitly asked for it this time (same "deferred/held-off is not permanent" pattern as
+Phase 16's held-out split and Phase 17's EV-active-review).
+
+- [x] `LatentTruthSafety` config sub-struct (`demote_on_correlated_warning`,
+  `min_evaluator_effective_n`, `demote_on_non_convergence`) — all off/`None` by default for
+  strict backward compatibility. `latent_truth_demotion_reason()` demotes a would-be `Keep` down
+  to `Review` only (never `Drop`), fixed priority order
+  (`correlated_evaluator_warning` > `evaluator_effective_n_below_minimum` >
+  `latent_truth_not_converged`), no effect unless `--decision-score latent-truth`.
+  `StabilityReport.latent_truth_demotion_reason` records which reason fired
+- [x] `calibrate` gains `train_precision: Option<f64>` (in-sample precision at the chosen
+  threshold, populated only alongside `--heldout`) and `--fail-below-target` (CI gate: prints
+  output first via an explicit `io::stdout().flush()?`, then `anyhow::bail!`s if
+  `achieved_precision < target_precision` — flush needed since `println!`'s buffer isn't
+  guaranteed flushed before a non-zero-exit-code process termination)
+- [x] `stable-wrong-risk --breakdown` — new `stable_wrong_breakdown()` in a new
+  `stable_wrong.rs`, tallying stable-wrong rate by evaluator/model/budget from
+  `group_by_sample_id`'s output. Explicitly a non-partition: a sample touching 2 evaluators
+  contributes to both rows, so per-key `n_keep` sums don't equal the top-level `n_keep` — this
+  is intentional and documented, not a bug
+- [x] active-review `--plan <path>`/`--budget <n>` — `select_within_budget()` is a greedy
+  value-density knapsack approximation (sort by `utility` desc, skip-and-continue past
+  unaffordable entries so a cheaper later entry can still fit) that writes a JSONL plan file;
+  unbounded (`--budget` omitted) includes everything, sorted
+- [x] `--profile game-ai` now also sets `score_sign: 2.0` by default (previously left untouched
+  in Phase 16 deliberately; reversed this cycle specifically because the user asked for it by
+  name) — documented in CHANGELOG as a non-breaking `### Changed` entry since it's opt-in via
+  `--profile game-ai` and only affects users with mixed-sign scores who use that profile
+- [x] 5 new `latent_truth.rs` unit tests (each demotion condition alone, all-off no-op, priority
+  order) + 7 new integration tests (2 fixture pairs: correlated-twins and
+  non-convergence-plus-supporting-samples, tuned via probe-then-finalize to hit the intended
+  baseline `Keep` decision) + 5 new `stable_wrong.rs` unit tests (hand-derived rates, dedup,
+  non-partition contribution, non-`Keep` exclusion, sort-order tie-break) + 3 new
+  `active_review.rs` tests (`select_within_budget` skip-and-continue, unbounded, zero-budget) +
+  CI test updates (calibrate CSV header/column-count, `--fail-below-target` exit code + stdout
+  still printed, active-review plan budget respected, stable-wrong-risk breakdown on/off and a
+  hand-derived evaluator rate)
+- [x] Manual smoke tests: baseline (no safety flags) vs. `--demote-on-correlated-warning` on the
+  correlated-twins fixture flips `decision`/`latent_truth_demotion_reason` exactly as predicted;
+  `select_within_budget` verified with explicit budgets (0.5 → empty, 1.0 → 1 entry) after an
+  initial confusing result turned out to be a stray shell-scripting artifact, not a real bug
+- [x] README.md/README_ja.md updated (latent-truth Decisions table + new safety-demotion
+  paragraph, calibrate `train_precision`/`--fail-below-target` section, active-review
+  `--plan`/`--budget` section + knapsack-approximation note, stable-wrong-risk `--breakdown`
+  section + non-partition caveat, game-ai profile table row); CHANGELOG Unreleased
+  Added/Changed entries
+- [x] cargo build --workspace --all-targets + test (31 lib + 85 integration + 15 CLI + 2 doctest)
+  + clippy -D warnings + fmt clean

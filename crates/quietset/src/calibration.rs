@@ -29,6 +29,11 @@ pub struct CalibrationResult {
     pub coverage: f64,
     pub n_keep: usize,
     pub n_total: usize,
+    /// In-sample precision at `keep_threshold`, measured on `observations` (the set the
+    /// threshold was selected from). `Some` only when `heldout` was supplied — otherwise it
+    /// would be identical to `achieved_precision` and is omitted as redundant. Lets a caller
+    /// see the training-vs-held-out gap directly instead of only through `note`'s prose.
+    pub train_precision: Option<f64>,
     /// Machine-readable caveat about how trustworthy `achieved_precision` is. `Some` when no
     /// `heldout` was given (the threshold was selected and measured on the same gold labels —
     /// always optimistic to some degree) or when `heldout` was given but its precision fell
@@ -200,6 +205,7 @@ pub fn compute_calibration(
                     coverage: ho_coverage,
                     n_keep: ho_n_keep,
                     n_total: ho_n_total,
+                    train_precision: Some(precision),
                     note,
                 });
             }
@@ -215,6 +221,7 @@ pub fn compute_calibration(
                 coverage,
                 n_keep,
                 n_total,
+                train_precision: None,
                 note: Some(
                     "achieved_precision and its confidence interval were selected and measured \
                      on the same gold-labeled data; the threshold search makes this optimistic. \

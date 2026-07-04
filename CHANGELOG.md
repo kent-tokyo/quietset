@@ -48,12 +48,48 @@
   urgency/action-selection logic itself is unchanged, promoted byte-for-byte from
   `quietset-cli` into a new `quietset::active_review` library module
   (`rank_active_review`/`ActiveReviewEntry`/`ActiveReviewWeights`/`ActiveReviewCosts`/`RankBy`).
+- `calibrate` gains `train_precision: Option<f64>` (the in-sample precision at the selected
+  threshold, populated only when `--heldout` is used — otherwise it would equal
+  `achieved_precision` and is omitted as redundant) and `--fail-below-target`, which exits
+  non-zero when `achieved_precision` falls short of `--target-precision` — a no-op without
+  `--heldout` (the grid search already guarantees the primary-input precision meets target),
+  but a CI-friendly gate on the honest held-out signal when `--heldout` is used.
+- `active-review` gains `--plan <path>` (writes a budget-constrained evaluation plan as JSONL,
+  always sorted by `utility` descending regardless of `--rank-by`, in addition to the normal
+  stdout output) and `--budget <f64>` (total cost constraint for `--plan`'s greedy selection;
+  unbounded — every entry, still utility-sorted — if omitted). New library function
+  `quietset::select_within_budget`.
+- `stable-wrong-risk --breakdown` — reports `stable_wrong_rate` per `evaluator_id`/`model_id`/
+  `budget` value among `Keep`-decision samples, so a specific evaluator/model/budget that shows
+  up disproportionately in stably-wrong-but-kept samples can be spotted directly. Sample-level,
+  like the existing top-level rate; a sample touching multiple evaluators contributes to
+  multiple rows, so rows don't sum to `n_keep` — this is deliberate, not a partition. Opt-in
+  (off by default) since it clones the input and does an extra grouping pass. New library
+  module `quietset::stable_wrong` (`stable_wrong_breakdown`/`StableWrongBreakdown`/
+  `EvaluatorStableWrongRate`/`ModelStableWrongRate`/`BudgetStableWrongRate`).
+- `DecisionScore::LatentTruth` gains three opt-in, default-off safety demotions via
+  `ScoreConfig::latent_truth_safety` (`--demote-on-correlated-warning`,
+  `--min-evaluator-effective-n <f64>`, `--demote-on-non-convergence` on `score` and
+  `stable-wrong-risk`): when any fires on a would-be `Keep` sample, `decision` demotes to
+  `Review` (never `Drop` — these are uncertainty signals, not wrongness signals) and the new
+  `latent_truth_demotion_reason` field records which one, via a fixed priority order
+  (`correlated_evaluator_warning` > `evaluator_effective_n_below_minimum` >
+  `latent_truth_not_converged`) when more than one fires at once. `stability_score` is never
+  touched. All three default off/unset, so every existing caller is unaffected.
 
 ### Changed (breaking)
 - `active-review`'s `suggested_action` values are renamed: `add_observations` →
   `request_gold_label`, `diversify_evaluators` → `add_evaluator`, `reduce_score_variance` →
   `add_model`, `add_budget` → `increase_budget`, `add_seeds` → `add_seed`. No test pinned the
   old strings; downstream tooling matching on these values needs updating.
+
+### Changed
+- `--profile game-ai` now also sets `score_sign: 2.0` (in addition to the existing
+  `budget_stability`/`seed_stability` ×2), so `score_sign_agreement` contributes to
+  `stability_score` by default under this profile. Every other profile is unaffected —
+  `score_sign_agreement` stays informational-only elsewhere unless explicitly weighted via
+  `--weight-score-sign`. This changes `stability_score`'s numeric value for existing
+  `--profile game-ai` users whose scores have mixed signs.
 
 ## 0.11.0 — 2026-07-04
 

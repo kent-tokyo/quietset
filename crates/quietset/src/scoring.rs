@@ -366,6 +366,7 @@ pub(crate) fn compute_report_inner(
         latent_truth_converged: None,
         latent_truth_iterations: None,
         latent_truth_convergence_delta: None,
+        latent_truth_demotion_reason: None,
         score_mean,
         score_std,
         score_range,

@@ -8,11 +8,12 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use quietset::{
-    ActiveReviewCosts, ActiveReviewWeights, Decision, DecisionScore, MinRequirements, Observation,
-    RankBy, ScoreConfig, ScoreDispersion, ScoreWeights, StabilityReport, Thresholds,
-    compute_calibration, compute_evaluator_reliability, compute_fleiss_kappa,
-    compute_krippendorff_alpha, parse_csv, parse_jsonl, rank_active_review, score_all,
-    score_all_gold_weighted, score_all_latent_truth, score_all_weighted,
+    ActiveReviewCosts, ActiveReviewWeights, Decision, DecisionScore, LatentTruthSafety,
+    MinRequirements, Observation, RankBy, ScoreConfig, ScoreDispersion, ScoreWeights,
+    StabilityReport, Thresholds, compute_calibration, compute_evaluator_reliability,
+    compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv, parse_jsonl, rank_active_review,
+    score_all, score_all_gold_weighted, score_all_latent_truth, score_all_weighted,
+    select_within_budget,
 };
 
 #[derive(Parser)]
@@ -218,6 +219,25 @@ struct ScoreArgs {
     /// mad/iqr are more robust when occasional outlier scores are present.
     #[arg(long, default_value = "std", value_enum)]
     score_dispersion: DispersionArg,
+
+    /// Demote Keep → Review when correlated_evaluator_warning fires (effective_n below 70% of
+    /// the nominal evaluator count). No-op unless --decision-score latent-truth is also used.
+    /// Default: off.
+    #[arg(long)]
+    demote_on_correlated_warning: bool,
+
+    /// Demote Keep → Review when evaluator_effective_n falls below this absolute minimum,
+    /// regardless of nominal evaluator count — independent of the relative 70%-of-nominal
+    /// warning above. No-op unless --decision-score latent-truth is also used. Default: unset
+    /// (no minimum, off).
+    #[arg(long)]
+    min_evaluator_effective_n: Option<f64>,
+
+    /// Demote Keep → Review when the latent-truth EM loop did not converge
+    /// (latent_truth_converged == false) before its iteration cap. No-op unless
+    /// --decision-score latent-truth is also used. Default: off.
+    #[arg(long)]
+    demote_on_non_convergence: bool,
 }
 
 #[derive(clap::Args)]
@@ -431,6 +451,25 @@ struct StableWrongRiskArgs {
     /// measured in-sample and optimistic; `raw` is the honest safety check.
     #[arg(long, value_enum)]
     decision_score: Option<DecisionScoreArg>,
+    /// Also report stable_wrong_rate broken down by evaluator_id/model_id/budget, so a
+    /// specific evaluator/model/budget that shows up disproportionately in stably-wrong Keep
+    /// samples can be spotted directly. A sample can touch multiple evaluators/models/budgets
+    /// at once, so rows within a breakdown do not sum to n_keep -- that's intentional, not a
+    /// partition. Off by default: this clones the input and does an extra grouping pass.
+    #[arg(long)]
+    breakdown: bool,
+    /// Demote Keep → Review when correlated_evaluator_warning fires. No-op unless
+    /// --decision-score latent-truth is also used. Default: off.
+    #[arg(long)]
+    demote_on_correlated_warning: bool,
+    /// Demote Keep → Review when evaluator_effective_n falls below this absolute minimum.
+    /// No-op unless --decision-score latent-truth is also used. Default: unset (off).
+    #[arg(long)]
+    min_evaluator_effective_n: Option<f64>,
+    /// Demote Keep → Review when the latent-truth EM loop did not converge. No-op unless
+    /// --decision-score latent-truth is also used. Default: off.
+    #[arg(long)]
+    demote_on_non_convergence: bool,
 }
 
 #[derive(clap::Args)]
@@ -460,6 +499,13 @@ struct CalibrateArgs {
     /// claims stdin. Must contain gold_label.
     #[arg(long)]
     heldout: Option<String>,
+    /// Exit with a non-zero status if achieved_precision falls below --target-precision.
+    /// Without --heldout this is effectively a no-op (the grid search already guarantees
+    /// achieved_precision >= target_precision on the primary input, or fails outright with an
+    /// error). With --heldout, achieved_precision is the held-out measurement, which can
+    /// legitimately fall short — this flag turns that honest signal into a CI-friendly gate.
+    #[arg(long)]
+    fail_below_target: bool,
 }
 
 #[derive(ValueEnum, Clone)]
@@ -557,6 +603,16 @@ struct ActiveReviewArgs {
     /// Sort order: urgency (today's heuristic) or utility (expected benefit / cost).
     #[arg(long, value_enum, default_value = "urgency")]
     rank_by: RankByArg,
+    /// Write a budget-constrained evaluation plan (JSONL, always sorted by utility
+    /// descending regardless of --rank-by) to this path, in addition to the normal stdout
+    /// output. Entries are chosen greedily by utility until --budget is exhausted.
+    #[arg(long)]
+    plan: Option<String>,
+    /// Total cost budget for --plan's greedy selection. Unbounded (includes every entry,
+    /// still sorted by utility) if --plan is given without --budget. Has no effect without
+    /// --plan.
+    #[arg(long)]
+    budget: Option<f64>,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -828,6 +884,7 @@ fn run_score(args: ScoreArgs) -> Result<()> {
         Some(ProfileArg::GameAi) => ScoreWeights {
             budget_stability: 2.0,
             seed_stability: 2.0,
+            score_sign: 2.0,
             ..ScoreWeights::default()
         },
         Some(ProfileArg::Benchmark) => ScoreWeights {
@@ -895,6 +952,11 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             DispersionArg::Iqr => ScoreDispersion::Iqr,
         },
         confidence_level: args.confidence_level,
+        latent_truth_safety: LatentTruthSafety {
+            demote_on_correlated_warning: args.demote_on_correlated_warning,
+            min_evaluator_effective_n: args.min_evaluator_effective_n,
+            demote_on_non_convergence: args.demote_on_non_convergence,
+        },
     };
     config.validate().context("invalid configuration")?;
     let reports = match (&config.decision_score, &args.vote) {
@@ -1984,8 +2046,18 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
             drop: 0.40,
         },
         decision_score: decision_score.clone(),
+        latent_truth_safety: LatentTruthSafety {
+            demote_on_correlated_warning: args.demote_on_correlated_warning,
+            min_evaluator_effective_n: args.min_evaluator_effective_n,
+            demote_on_non_convergence: args.demote_on_non_convergence,
+        },
         ..ScoreConfig::default()
     };
+
+    let observations_by_sample = args
+        .breakdown
+        .then(|| quietset::group::group_by_sample_id(observations.iter().cloned()));
+
     let reports = match decision_score {
         DecisionScore::GoldWeighted => score_all_gold_weighted(observations, &config),
         DecisionScore::LatentTruth => score_all_latent_truth(observations, &config),
@@ -2005,14 +2077,16 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
             .or(r.majority_label.as_deref())
     }
 
-    let mut stable_wrong: Vec<serde_json::Value> = reports
-        .iter()
-        .filter(|r| r.decision == Decision::Keep)
-        .filter(|r| {
-            label_of(r)
+    let is_stable_wrong = |r: &StabilityReport| {
+        r.decision == Decision::Keep
+            && label_of(r)
                 .and_then(|m| gold_map.get(&r.sample_id).map(|g| m != g.as_str()))
                 .unwrap_or(false)
-        })
+    };
+
+    let mut stable_wrong: Vec<serde_json::Value> = reports
+        .iter()
+        .filter(|r| is_stable_wrong(r))
         .map(|r| {
             serde_json::json!({
                 "sample_id": r.sample_id,
@@ -2032,6 +2106,20 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let breakdown = observations_by_sample.map(|obs_by_sample| {
+        let keep_sample_ids: std::collections::HashSet<String> = reports
+            .iter()
+            .filter(|r| r.decision == Decision::Keep)
+            .map(|r| r.sample_id.clone())
+            .collect();
+        let stable_wrong_sample_ids: std::collections::HashSet<String> = reports
+            .iter()
+            .filter(|r| is_stable_wrong(r))
+            .map(|r| r.sample_id.clone())
+            .collect();
+        quietset::stable_wrong_breakdown(&obs_by_sample, &keep_sample_ids, &stable_wrong_sample_ids)
+    });
+
     let n_stable_wrong = stable_wrong.len();
     let rate = if n_keep > 0 {
         n_stable_wrong as f64 / n_keep as f64
@@ -2039,16 +2127,59 @@ fn run_stable_wrong_risk(args: StableWrongRiskArgs) -> Result<()> {
         0.0
     };
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "n_total": n_total,
-            "n_keep": n_keep,
-            "n_stable_wrong": n_stable_wrong,
-            "stable_wrong_rate_among_keep": rate,
-            "samples": stable_wrong.iter().take(args.top).collect::<Vec<_>>(),
-        }))?
-    );
+    let mut out = serde_json::json!({
+        "n_total": n_total,
+        "n_keep": n_keep,
+        "n_stable_wrong": n_stable_wrong,
+        "stable_wrong_rate_among_keep": rate,
+        "samples": stable_wrong.iter().take(args.top).collect::<Vec<_>>(),
+    });
+    if let Some(b) = &breakdown {
+        let obj = out.as_object_mut().expect("json! object literal");
+        obj.insert(
+            "by_evaluator".into(),
+            serde_json::json!(
+                b.by_evaluator
+                    .iter()
+                    .map(|e| serde_json::json!({
+                        "evaluator_id": e.evaluator_id,
+                        "n_keep": e.n_keep,
+                        "n_stable_wrong": e.n_stable_wrong,
+                        "stable_wrong_rate": e.stable_wrong_rate,
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        obj.insert(
+            "by_model".into(),
+            serde_json::json!(
+                b.by_model
+                    .iter()
+                    .map(|m| serde_json::json!({
+                        "model_id": m.model_id,
+                        "n_keep": m.n_keep,
+                        "n_stable_wrong": m.n_stable_wrong,
+                        "stable_wrong_rate": m.stable_wrong_rate,
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        obj.insert(
+            "by_budget".into(),
+            serde_json::json!(
+                b.by_budget
+                    .iter()
+                    .map(|bg| serde_json::json!({
+                        "budget": bg.budget,
+                        "n_keep": bg.n_keep,
+                        "n_stable_wrong": bg.n_stable_wrong,
+                        "stable_wrong_rate": bg.stable_wrong_rate,
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 
@@ -2120,6 +2251,7 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
                     "coverage":             result.coverage,
                     "n_keep":               result.n_keep,
                     "n_total":              result.n_total,
+                    "train_precision":      result.train_precision,
                     "validated_on_heldout": validated_on_heldout,
                     "note":                 result.note,
                 }))?
@@ -2137,6 +2269,7 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
                 "coverage",
                 "n_keep",
                 "n_total",
+                "train_precision",
                 "validated_on_heldout",
                 "note",
             ])?;
@@ -2150,11 +2283,24 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
                 format!("{:.6}", result.coverage),
                 result.n_keep.to_string(),
                 result.n_total.to_string(),
+                result
+                    .train_precision
+                    .map(|v| format!("{v:.6}"))
+                    .unwrap_or_default(),
                 validated_on_heldout.to_string(),
                 result.note.clone().unwrap_or_default(),
             ])?;
             wtr.flush()?;
         }
+    }
+    io::stdout().flush()?;
+
+    if args.fail_below_target && result.achieved_precision < args.target_precision {
+        anyhow::bail!(
+            "achieved_precision {:.4} is below --target-precision {:.4}",
+            result.achieved_precision,
+            args.target_precision
+        );
     }
     Ok(())
 }
@@ -2508,43 +2654,55 @@ fn run_active_review(args: ActiveReviewArgs) -> Result<()> {
 
     let take = args.top.unwrap_or(entries.len());
     for e in entries.iter().take(take) {
-        let mut obj = serde_json::Map::new();
-        obj.insert("sample_id".into(), serde_json::json!(e.sample_id));
-        obj.insert("urgency_score".into(), serde_json::json!(e.urgency_score));
-        obj.insert("primary_reason".into(), serde_json::json!(e.primary_reason));
-        obj.insert(
-            "suggested_action".into(),
-            serde_json::json!(e.suggested_action),
-        );
-        if let Some(v) = e.label_agreement_lcb {
-            obj.insert("label_agreement_lcb".into(), serde_json::json!(v));
+        println!("{}", serde_json::to_string(&active_review_entry_json(e))?);
+    }
+
+    if let Some(plan_path) = &args.plan {
+        let budget = args.budget.unwrap_or(f64::INFINITY);
+        let planned = select_within_budget(&entries, budget);
+        let mut out = String::new();
+        for e in &planned {
+            out.push_str(&serde_json::to_string(&active_review_entry_json(e))?);
+            out.push('\n');
         }
-        if let Some(v) = e.label_entropy {
-            obj.insert("label_entropy".into(), serde_json::json!(v));
-        }
-        if let Some(v) = e.budget_sensitivity {
-            obj.insert("budget_sensitivity".into(), serde_json::json!(v));
-        }
-        if let Some(v) = e.seed_sensitivity {
-            obj.insert("seed_sensitivity".into(), serde_json::json!(v));
-        }
-        if let Some(v) = e.label_agreement_flip_ratio {
-            obj.insert("label_agreement_flip_ratio".into(), serde_json::json!(v));
-        }
-        obj.insert(
-            "expected_coverage_gain".into(),
-            serde_json::json!(e.expected_coverage_gain),
-        );
-        obj.insert(
-            "expected_risk_reduction".into(),
-            serde_json::json!(e.expected_risk_reduction),
-        );
-        obj.insert("cost".into(), serde_json::json!(e.cost));
-        obj.insert("utility".into(), serde_json::json!(e.utility));
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::Value::Object(obj))?
-        );
+        std::fs::write(plan_path, out).with_context(|| format!("writing plan to {plan_path}"))?;
     }
     Ok(())
+}
+
+fn active_review_entry_json(e: &quietset::ActiveReviewEntry) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("sample_id".into(), serde_json::json!(e.sample_id));
+    obj.insert("urgency_score".into(), serde_json::json!(e.urgency_score));
+    obj.insert("primary_reason".into(), serde_json::json!(e.primary_reason));
+    obj.insert(
+        "suggested_action".into(),
+        serde_json::json!(e.suggested_action),
+    );
+    if let Some(v) = e.label_agreement_lcb {
+        obj.insert("label_agreement_lcb".into(), serde_json::json!(v));
+    }
+    if let Some(v) = e.label_entropy {
+        obj.insert("label_entropy".into(), serde_json::json!(v));
+    }
+    if let Some(v) = e.budget_sensitivity {
+        obj.insert("budget_sensitivity".into(), serde_json::json!(v));
+    }
+    if let Some(v) = e.seed_sensitivity {
+        obj.insert("seed_sensitivity".into(), serde_json::json!(v));
+    }
+    if let Some(v) = e.label_agreement_flip_ratio {
+        obj.insert("label_agreement_flip_ratio".into(), serde_json::json!(v));
+    }
+    obj.insert(
+        "expected_coverage_gain".into(),
+        serde_json::json!(e.expected_coverage_gain),
+    );
+    obj.insert(
+        "expected_risk_reduction".into(),
+        serde_json::json!(e.expected_risk_reduction),
+    );
+    obj.insert("cost".into(), serde_json::json!(e.cost));
+    obj.insert("utility".into(), serde_json::json!(e.utility));
+    serde_json::Value::Object(obj)
 }

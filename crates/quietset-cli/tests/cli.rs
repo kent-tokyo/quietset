@@ -165,10 +165,10 @@ fn calibrate_csv_output_has_header_and_one_data_row() {
     let header = lines.next().expect("header row");
     assert_eq!(
         header,
-        "decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,validated_on_heldout,note"
+        "decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note"
     );
     let data = lines.next().expect("one data row");
-    assert_eq!(data.split(',').count(), 11);
+    assert_eq!(data.split(',').count(), 12);
     assert!(lines.next().is_none(), "should be exactly one data row");
 }
 
@@ -232,4 +232,149 @@ fn active_review_output_has_expected_value_fields_and_renamed_actions() {
         .contains(&action),
         "suggested_action should use the renamed action set, got {action}"
     );
+}
+
+#[test]
+fn calibrate_fail_below_target_exits_nonzero_but_still_prints_output() {
+    // Training: 9/10 correct (0.90 precision) -> a threshold clears --target-precision 0.80.
+    // Held-out: 2/10 correct (0.20 precision) -> falls well short of the target.
+    let mut train = String::new();
+    for i in 0..9 {
+        train.push_str(&format!(
+            "{{\"sample_id\":\"t{i}\",\"label\":\"win\",\"gold_label\":\"win\",\"evaluator_id\":\"e0\"}}\n"
+        ));
+    }
+    train.push_str(
+        "{\"sample_id\":\"tw\",\"label\":\"loss\",\"gold_label\":\"win\",\"evaluator_id\":\"e0\"}\n",
+    );
+    let train_path = write_temp("calibrate_fail_train.jsonl", &train);
+
+    let mut heldout = String::new();
+    for i in 0..2 {
+        heldout.push_str(&format!(
+            "{{\"sample_id\":\"h{i}\",\"label\":\"win\",\"gold_label\":\"win\",\"evaluator_id\":\"e0\"}}\n"
+        ));
+    }
+    for i in 0..8 {
+        heldout.push_str(&format!(
+            "{{\"sample_id\":\"hw{i}\",\"label\":\"loss\",\"gold_label\":\"win\",\"evaluator_id\":\"e0\"}}\n"
+        ));
+    }
+    let heldout_path = write_temp("calibrate_fail_heldout.jsonl", &heldout);
+
+    let out = run(&[
+        "calibrate",
+        train_path.to_str().unwrap(),
+        "--target-precision",
+        "0.80",
+        "--heldout",
+        heldout_path.to_str().unwrap(),
+        "--fail-below-target",
+    ]);
+    assert!(
+        !out.status.success(),
+        "should exit non-zero when held-out precision falls below target"
+    );
+    assert!(
+        stdout(&out).contains("\"achieved_precision\""),
+        "the calibration result should still be printed to stdout before the non-zero exit"
+    );
+    assert!(stderr(&out).contains("below --target-precision"));
+}
+
+#[test]
+fn active_review_plan_respects_budget_and_defaults_to_unbounded() {
+    let path = write_temp(
+        "plan_input.jsonl",
+        "{\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"win\"}\n\
+         {\"sample_id\":\"cheap\",\"label\":\"loss\"}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"seed\":0,\"score\":0.9}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"seed\":1,\"score\":0.1}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"seed\":0,\"score\":0.9}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"seed\":1,\"score\":0.1}\n",
+    );
+    let scored = run(&["score", path.to_str().unwrap()]);
+    assert!(scored.status.success());
+    let scored_path = write_temp("plan_scored.jsonl", &stdout(&scored));
+
+    let plan_path =
+        std::env::temp_dir().join(format!("quietset_cli_test_plan_out_{}", std::process::id()));
+
+    let out = run(&[
+        "active-review",
+        scored_path.to_str().unwrap(),
+        "--plan",
+        plan_path.to_str().unwrap(),
+        "--budget",
+        "1.0",
+    ]);
+    assert!(out.status.success());
+    let plan_text = std::fs::read_to_string(&plan_path).unwrap();
+    let plan_lines: Vec<&str> = plan_text.lines().collect();
+    assert_eq!(
+        plan_lines.len(),
+        1,
+        "budget 1.0 should only afford the single highest-utility (cost 1.0) entry"
+    );
+    assert!(plan_lines[0].contains("\"sample_id\":\"cheap\""));
+
+    let out_unbounded = run(&[
+        "active-review",
+        scored_path.to_str().unwrap(),
+        "--plan",
+        plan_path.to_str().unwrap(),
+    ]);
+    assert!(out_unbounded.status.success());
+    let unbounded_text = std::fs::read_to_string(&plan_path).unwrap();
+    assert_eq!(
+        unbounded_text.lines().count(),
+        2,
+        "without --budget, --plan should write every entry"
+    );
+
+    std::fs::remove_file(&plan_path).ok();
+}
+
+#[test]
+fn stable_wrong_risk_breakdown_off_by_default() {
+    let path = gold_labeled_fixture();
+    let out = run(&["stable-wrong-risk", path.to_str().unwrap()]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(!text.contains("by_evaluator"));
+    assert!(!text.contains("by_model"));
+    assert!(!text.contains("by_budget"));
+}
+
+#[test]
+fn stable_wrong_risk_breakdown_computes_real_evaluator_rate() {
+    // "right": unanimous "win", gold "win", evaluator e1 -> Keep, matches gold.
+    // "wrong": unanimous "loss", gold "win", evaluator e1 -> Keep, disagrees with gold.
+    // e1 touches both Keep samples -> n_keep=2, n_stable_wrong=1, rate=0.5.
+    let path = write_temp(
+        "stable_wrong_breakdown.jsonl",
+        "{\"sample_id\":\"right\",\"label\":\"win\",\"gold_label\":\"win\",\"evaluator_id\":\"e1\"}\n\
+         {\"sample_id\":\"right\",\"label\":\"win\",\"gold_label\":\"win\",\"evaluator_id\":\"e1\"}\n\
+         {\"sample_id\":\"right\",\"label\":\"win\",\"gold_label\":\"win\",\"evaluator_id\":\"e1\"}\n\
+         {\"sample_id\":\"wrong\",\"label\":\"loss\",\"gold_label\":\"win\",\"evaluator_id\":\"e1\"}\n\
+         {\"sample_id\":\"wrong\",\"label\":\"loss\",\"gold_label\":\"win\",\"evaluator_id\":\"e1\"}\n\
+         {\"sample_id\":\"wrong\",\"label\":\"loss\",\"gold_label\":\"win\",\"evaluator_id\":\"e1\"}\n",
+    );
+    let out = run(&["stable-wrong-risk", path.to_str().unwrap(), "--breakdown"]);
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let by_evaluator = value["by_evaluator"].as_array().unwrap();
+    assert_eq!(by_evaluator.len(), 1);
+    assert_eq!(by_evaluator[0]["evaluator_id"], "e1");
+    assert_eq!(by_evaluator[0]["n_keep"], 2);
+    assert_eq!(by_evaluator[0]["n_stable_wrong"], 1);
+    assert!((by_evaluator[0]["stable_wrong_rate"].as_f64().unwrap() - 0.5).abs() < 1e-9);
 }

@@ -1,3 +1,4 @@
+use crate::config::LatentTruthSafety;
 use crate::observation::Observation;
 use indexmap::IndexMap;
 use std::collections::{BTreeSet, HashMap};
@@ -299,6 +300,30 @@ fn evaluator_pairwise_correlation(a: &HashMap<usize, bool>, b: &HashMap<usize, b
     phi.clamp(0.0, 1.0)
 }
 
+/// Decides whether a latent-truth `Keep` should be demoted to `Review`, and why. Checked in a
+/// fixed priority order when multiple conditions fire simultaneously (same fixed-declaration-
+/// order tiebreak convention as `StabilityComponents::weakest()`): the relative correlated-
+/// evaluator warning first, then the absolute effective-n floor, then non-convergence. Pure
+/// and independent of EM — takes only the already-converged `LatentTruthEstimate` plus config,
+/// so it's directly unit-testable without running EM to convergence.
+pub(crate) fn latent_truth_demotion_reason(
+    estimate: &LatentTruthEstimate,
+    safety: &LatentTruthSafety,
+) -> Option<&'static str> {
+    if safety.demote_on_correlated_warning && estimate.correlated_evaluator_warning {
+        return Some("correlated_evaluator_warning");
+    }
+    if let Some(min_n) = safety.min_evaluator_effective_n
+        && estimate.evaluator_effective_n < min_n
+    {
+        return Some("evaluator_effective_n_below_minimum");
+    }
+    if safety.demote_on_non_convergence && !estimate.converged {
+        return Some("latent_truth_not_converged");
+    }
+    None
+}
+
 /// One Dawid-Skene M-step + E-step. `samples[s]` is sample `s`'s qualifying
 /// `(evaluator_idx, label_idx)` observations; `pi[s][l]` is its current posterior for label
 /// `l`. Returns updated posteriors. Laplace smoothing (`SMOOTHING_ALPHA`) keeps every
@@ -358,6 +383,99 @@ fn em_step(k: usize, j: usize, samples: &[Vec<(usize, usize)>], pi: &[Vec<f64>])
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::LatentTruthSafety;
+
+    fn estimate(
+        evaluator_effective_n: f64,
+        correlated_evaluator_warning: bool,
+        converged: bool,
+    ) -> LatentTruthEstimate {
+        LatentTruthEstimate {
+            label: "a".into(),
+            confidence: 0.9,
+            distribution: IndexMap::new(),
+            evaluator_effective_n,
+            correlated_evaluator_warning,
+            converged,
+            iterations: 1,
+            convergence_delta: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_demotion_reason_correlated_warning_alone() {
+        let e = estimate(3.0, true, true);
+        let safety = LatentTruthSafety {
+            demote_on_correlated_warning: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            latent_truth_demotion_reason(&e, &safety),
+            Some("correlated_evaluator_warning")
+        );
+    }
+
+    #[test]
+    fn test_demotion_reason_min_effective_n_alone() {
+        let e = estimate(1.5, false, true);
+        let safety = LatentTruthSafety {
+            min_evaluator_effective_n: Some(2.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            latent_truth_demotion_reason(&e, &safety),
+            Some("evaluator_effective_n_below_minimum")
+        );
+    }
+
+    #[test]
+    fn test_demotion_reason_non_convergence_alone() {
+        let e = estimate(3.0, false, false);
+        let safety = LatentTruthSafety {
+            demote_on_non_convergence: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            latent_truth_demotion_reason(&e, &safety),
+            Some("latent_truth_not_converged")
+        );
+    }
+
+    #[test]
+    fn test_demotion_reason_all_flags_off_returns_none() {
+        // Every condition would fire, but LatentTruthSafety::default() has all flags off.
+        let e = estimate(1.0, true, false);
+        assert_eq!(
+            latent_truth_demotion_reason(&e, &LatentTruthSafety::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_demotion_reason_priority_order() {
+        // All three conditions fire, all three flags on -> correlated_evaluator_warning wins.
+        let e = estimate(1.0, true, false);
+        let safety = LatentTruthSafety {
+            demote_on_correlated_warning: true,
+            min_evaluator_effective_n: Some(2.0),
+            demote_on_non_convergence: true,
+        };
+        assert_eq!(
+            latent_truth_demotion_reason(&e, &safety),
+            Some("correlated_evaluator_warning")
+        );
+
+        // Correlated flag off, but min-n and non-convergence both fire -> min-n wins.
+        let safety2 = LatentTruthSafety {
+            demote_on_correlated_warning: false,
+            min_evaluator_effective_n: Some(2.0),
+            demote_on_non_convergence: true,
+        };
+        assert_eq!(
+            latent_truth_demotion_reason(&e, &safety2),
+            Some("evaluator_effective_n_below_minimum")
+        );
+    }
 
     /// Two perfectly-agreeing evaluators (A, B), two samples each unanimous on a different
     /// label. Hand-derived: after majority-vote init `pi = [[1,0],[0,1]]`, one M+E step gives

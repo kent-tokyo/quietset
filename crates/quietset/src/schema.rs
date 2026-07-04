@@ -161,6 +161,16 @@ pub struct StabilityReport {
     /// latent-truth EM did not run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latent_truth_convergence_delta: Option<f64>,
+    /// Which safety-demotion condition (if any) downgraded this sample from `Keep` to
+    /// `Review`: `"correlated_evaluator_warning"`, `"evaluator_effective_n_below_minimum"`, or
+    /// `"latent_truth_not_converged"`. `None` when: `ScoreConfig::latent_truth_safety`'s flags
+    /// are all off/unset (the default), latent-truth EM did not run for this sample, or the
+    /// sample's decision was never `Keep` to begin with (already-`Review`/`Drop` samples are
+    /// never touched). When more than one condition fires at once, this reports a single
+    /// reason via a fixed priority order — see the (crate-private)
+    /// `latent_truth::latent_truth_demotion_reason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent_truth_demotion_reason: Option<String>,
     /// Mean of all numeric scores.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_mean: Option<f64>,

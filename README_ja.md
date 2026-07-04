@@ -225,7 +225,7 @@ quietsetコマンドにパイプする予定があるなら、`csv`ではなく�
 | `seed_robustness` | `1 - seed_sensitivity`（シード変化への頑健性） |
 | `model_agreement` | モデル間のラベル一致度 |
 | `evaluator_agreement` | 評価者間のラベル一致度 |
-| `score_sign_agreement` | 数値スコアの多数派符号が占める割合 — デフォルトの重みは `0`（除外）。`--weight-score-sign` で有効化できる |
+| `score_sign_agreement` | 数値スコアの多数派符号が占める割合 — デフォルトの重みは `0`（除外）。`--weight-score-sign` で有効化できる（`--profile game-ai` はデフォルトで `×2` 有効） |
 
 対応するフィールドがない次元（例：ラベルなし、budget なし）は平均から除外されます。
 観測が1件のみのサンプルは `stability_score = 0.5`（デフォルトで `review`）になります。
@@ -239,7 +239,7 @@ quietsetコマンドにパイプする予定があるなら、`csv`ではなく�
 | `label_agreement_lcb` | `label_agreement` の Wilson 信頼区間下限。少数観測の過信を防ぐ保守的な指標。 |
 | `score_mad` | スコアの中央絶対偏差（MAD）。外れ値への耐性が `score_std` より高い。 |
 | `score_iqr` | スコアの四分位範囲（Q3 − Q1）。 |
-| `score_sign_agreement` | 数値スコアの多数派符号（負・0・正）が占める割合。符号付きでゼロ中心のスコア（将棋・チェス系の評価値）向けの、magnitude 系指標（`score_std`/`score_mad`/`score_iqr`）を補完する指標 — `[+0.01, -0.01]` は magnitude だけ見るとほぼ完全に安定に見えるが、符号は五分五分。常に計算されるが、デフォルトでは `stability_score` から除外される（`--weight-score-sign 0`）。`--weight-score-sign <f>` を渡すと寄与するようになる。 |
+| `score_sign_agreement` | 数値スコアの多数派符号（負・0・正）が占める割合。符号付きでゼロ中心のスコア（将棋・チェス系の評価値）向けの、magnitude 系指標（`score_std`/`score_mad`/`score_iqr`）を補完する指標 — `[+0.01, -0.01]` は magnitude だけ見るとほぼ完全に安定に見えるが、符号は五分五分。常に計算されるが、デフォルトでは `stability_score` から除外される（`--weight-score-sign 0`）。`--weight-score-sign <f>` を渡すと寄与するようになる。`--profile game-ai` はデフォルトで `×2` 有効にする — 他のすべてのプロファイルでは、明示的に重み付けしない限り情報提供のみのフィールドのまま。 |
 | `budget_slope` | budget 増加に対するスコアの傾き（正 = 上昇収束） |
 | `confidence` | `n / (n + k)` — 証拠量に基づくスコアの信頼度 |
 | `adjusted_stability_score` | `stability * confidence + 0.5 * (1 - confidence)` |
@@ -272,7 +272,7 @@ quietsetコマンドにパイプする予定があるなら、`csv`ではなく�
 |------------|--------|------------------------|
 | `llm-judge` | evaluator ×2、model ×2 | `lcb` |
 | `simulation` | budget ×2、seed ×2 | `adjusted` |
-| `game-ai` | budget ×2、seed ×2、最低観測数 4、最低budget数 2、最低seed数 2、最低evaluator数 2 | `lcb` |
+| `game-ai` | budget ×2、seed ×2、score_sign ×2、最低観測数 4、最低budget数 2、最低seed数 2、最低evaluator数 2 | `lcb` |
 | `benchmark` | label ×2、evaluator ×1.5 | `raw` |
 
 ```bash
@@ -324,9 +324,21 @@ quietset score input.jsonl \
 | `--decision-score adjusted` | `--use-adjusted-score` | `adjusted_stability_score` | 証拠量に比例してペナルティ。 |
 | `--decision-score lcb` | `--use-lcb-score` | `label_agreement_lcb`（ラベル部分） | Wilson LCB — 最も保守的。2/2 一致でも LCB ≈ 0.34（95%信頼）になり、証拠なしでは keep にならない。 |
 | `--decision-score gold-weighted` | — | `stability_score`（ラベル部分を信頼性で重み付け） | 生の多数決の代わりに `gold_label` の一致履歴に基づく信頼性重み付き投票を使用。バッチ全体に `gold_label` が一つも無い場合は `raw` と同一の挙動になる。 |
-| `--decision-score latent-truth` | — | `stability_score`（ラベル部分をEMで重み付け） | 生の多数決の代わりに Dawid-Skene EM が推定した投票を使用 — `gold_label` なしで、不一致パターンだけから評価者ごとの信頼性を推定する。バッチ全体で評価者またはラベルの種類が2未満の場合は `raw` と同一の挙動になる。出力に `latent_truth_label`、`latent_truth_confidence`、`latent_truth_label_distribution`、`majority_latent_conflict`、`evaluator_effective_n`、`correlated_evaluator_warning`、`latent_truth_converged`、`latent_truth_iterations`、`latent_truth_convergence_delta` が追加される。`latent_truth_confidence` はEMが当てはめた事後確率であり、評価者が少ないと 0/1 に張り付きやすく、評価者のバイアスが相関している場合は自信満々に間違うこともある — 正しさの保証ではない。`evaluator_effective_n`/`correlated_evaluator_warning` は同じリスク（相関した評価者誤りに対する Kish design effect）を診断するが、*他の*評価者がその相関ブロックの偏りを暴露した場合にしか検出できない — 相関ブロックがEMのconsensusをそのまま乗っ取ってしまった場合は警告は出ない。自己整合性の診断であり、独立した正しさのチェックではない。`latent_truth_converged` は、EMループが収束epsilonに達する前にiteration上限を使い切った場合に false になる（`latent_truth_iterations` が上限に達し、`latent_truth_convergence_delta` は収束epsilonを上回ったまま）— その事後確率は依然として有効だが確信度は低い。バッチ全体でEMは1回だけ実行されるため、同じバッチ内の全サンプルで同じ値になる。 |
+| `--decision-score latent-truth` | — | `stability_score`（ラベル部分をEMで重み付け） | 生の多数決の代わりに Dawid-Skene EM が推定した投票を使用 — `gold_label` なしで、不一致パターンだけから評価者ごとの信頼性を推定する。バッチ全体で評価者またはラベルの種類が2未満の場合は `raw` と同一の挙動になる。出力に `latent_truth_label`、`latent_truth_confidence`、`latent_truth_label_distribution`、`majority_latent_conflict`、`evaluator_effective_n`、`correlated_evaluator_warning`、`latent_truth_converged`、`latent_truth_iterations`、`latent_truth_convergence_delta`、`latent_truth_demotion_reason` が追加される。`latent_truth_confidence` はEMが当てはめた事後確率であり、評価者が少ないと 0/1 に張り付きやすく、評価者のバイアスが相関している場合は自信満々に間違うこともある — 正しさの保証ではない。`evaluator_effective_n`/`correlated_evaluator_warning` は同じリスク（相関した評価者誤りに対する Kish design effect）を診断するが、*他の*評価者がその相関ブロックの偏りを暴露した場合にしか検出できない — 相関ブロックがEMのconsensusをそのまま乗っ取ってしまった場合は警告は出ない。自己整合性の診断であり、独立した正しさのチェックではない。`latent_truth_converged` は、EMループが収束epsilonに達する前にiteration上限を使い切った場合に false になる（`latent_truth_iterations` が上限に達し、`latent_truth_convergence_delta` は収束epsilonを上回ったまま）— その事後確率は依然として有効だが確信度は低い。バッチ全体でEMは1回だけ実行されるため、同じバッチ内の全サンプルで同じ値になる。 |
 
-`MinRequirements` はどのモードでも閾値判定の**後に**適用されます。
+`MinRequirements` はどのモードでも閾値判定の**後に**適用されます。`--decision-score latent-truth`
+では、さらにその後にデフォルトで無効な3つの opt-in safety demotion が適用されます:
+`--demote-on-correlated-warning`（`correlated_evaluator_warning` が発火した場合に demote）、
+`--min-evaluator-effective-n <f64>`（`evaluator_effective_n` がこの絶対値を下回った場合に
+demote — 上記の相対的な70%閾値の警告とは独立）、`--demote-on-non-convergence`
+（`latent_truth_converged` が false の場合に demote）。いずれも `Keep` → `Review` へのみ
+demote します — これらは不確実性のシグナルであって間違いの確信ではないため、`Drop` まで
+落とすことはなく、`stability_score` 自体にも触れません。demote が発火した場合、
+`latent_truth_demotion_reason` がどの条件かを示します（`correlated_evaluator_warning`、
+`evaluator_effective_n_below_minimum`、`latent_truth_not_converged` のいずれか。複数条件が
+同時に発火した場合はこの優先順位）。`score` と `stable-wrong-risk` で利用可能。
+`calibrate`/`policy`/`compare --policy-after` は `decision` ではなく生のスコアを直接比較する
+ため no-op です。
 
 | 条件 | 判定 |
 |------|------|
@@ -592,7 +604,10 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 なります。メイン入力側で選ばれた閾値が過学習していれば、報告される precision は
 `--target-precision` を下回ることがありますが、それは正しい・正直なシグナルであり、バグでは
 ありません。出力の `validated_on_heldout` は `--heldout` が使われたかどうかを示すので、保存した
-結果を後で見ても何を測定したものか分かります:
+結果を後で見ても何を測定したものか分かります。`train_precision` は同じ閾値での in-sample
+precision を `achieved_precision`（`--heldout` 使用時は held-out precision になる）と並べて
+公開します — `--heldout` を使っていない場合は `achieved_precision` と同じ値になってしまうため
+`null` になります:
 
 ```bash
 quietset calibrate input.jsonl --target-precision 0.95 --heldout heldout_gold.jsonl
@@ -608,8 +623,9 @@ quietset calibrate input.jsonl --target-precision 0.95 --heldout heldout_gold.js
   "coverage": 1.0,
   "n_keep": 24,
   "n_total": 24,
+  "train_precision": 0.97,
   "validated_on_heldout": true,
-  "note": null
+  "note": "in-sample precision at this threshold was 0.970, held-out precision is 0.710 (gap 0.260) — the training-selected threshold likely overfit the training gold labels"
 }
 ```
 
@@ -619,8 +635,20 @@ quietset calibrate input.jsonl --target-precision 0.95 --heldout heldout_gold.js
 quietset calibrate input.jsonl --target-precision 0.95 --output-format csv
 ```
 ```csv
-decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,validated_on_heldout,note
-lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
+decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note
+lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
+```
+
+`--fail-below-target` を使うと `calibrate` を CI gate にできます: 結果を出力した上で、
+`achieved_precision` が `--target-precision` を下回っていれば非ゼロで終了します。`--heldout`
+なしでは実質的に no-op です（grid search が既に主入力での `achieved_precision >=
+--target-precision` を保証するか、そうでなければエラーで失敗するため）。`--heldout` を使う場合、
+`achieved_precision` は held-out での測定値であり、目標を下回ることが正当にあり得ます —
+このフラグはその正直なシグナルを CI パイプラインが判定できる形にします:
+
+```bash
+quietset calibrate train.jsonl --heldout heldout.jsonl --target-precision 0.98 --fail-below-target
+echo "exit code: $?"
 ```
 
 ## select コマンド
@@ -691,6 +719,37 @@ quietset stable-wrong-risk input.jsonl --keep-threshold 0.90
 ```
 
 `gold_label` が必須です。`stability_score` 降順にソートされ、最も自信を持って keep されている誤りサンプルが先頭に来ます。`--top N` でサンプル数を制限できます。
+
+`--breakdown` を使うと、`Keep` 判定サンプルにおける `stable_wrong_rate` を
+`evaluator_id`/`model_id`/`budget` ごとに分解して報告できます — 特定の評価者・モデル・budget が
+「安定して間違っているのに keep されているサンプル」に不釣り合いに多く現れていないかを見つけられます:
+
+```bash
+quietset stable-wrong-risk input.jsonl --breakdown
+```
+```json
+{
+  "n_total": 1000,
+  "n_keep": 621,
+  "n_stable_wrong": 12,
+  "stable_wrong_rate_among_keep": 0.019,
+  "samples": [ ... ],
+  "by_evaluator": [
+    {"evaluator_id": "m1", "n_keep": 340, "n_stable_wrong": 9, "stable_wrong_rate": 0.026},
+    {"evaluator_id": "m2", "n_keep": 281, "n_stable_wrong": 3, "stable_wrong_rate": 0.011}
+  ],
+  "by_model": [ ... ],
+  "by_budget": [ ... ]
+}
+```
+
+各内訳はトップレベルの rate と同様サンプルレベルです: `by_evaluator[i].n_keep` はその
+`evaluator_id` に触れている `Keep` サンプル数であり、観測数ではありません。1つのサンプルが
+複数の evaluator/model/budget に同時に触れることがあるため、内訳の各行を合計してもトップレベルの
+`n_keep` にはなりません — これは意図的なもので、パーティション（分割）ではありません。
+「wrong-but-confident なサンプルにどの evaluator/model/budget が現れるか」を答えるものであり、
+「誰の責任か」を答えるものではありません。デフォルトでは無効です — 入力をクローンして追加の
+グルーピング処理を行うためです。
 
 ## compare --policy-after
 
@@ -798,6 +857,20 @@ quietset active-review scored.jsonl --unstable-only --top 20
 ものではない。`--rank-by urgency`（デフォルト）は `urgency_score` で、`--rank-by utility` は
 `utility` でソートし、単に不安定に見えるサンプルではなく追加レビューの効果が最も大きいサンプルを
 浮かび上がらせる。
+
+`--plan <path>` を使うと、予算制約付きの評価計画を JSONL として書き出せる — `--rank-by` に
+関わらず常に `utility` 降順で、通常の標準出力に加えて出力される。`--budget <f64>` は含める
+エントリの総 `cost` の上限を指定する: utility 順に貪欲に採用し、収まらないものはスキップして
+（そこで打ち切らずに）走査を続けるので、リストの後方にあるより安価で utility の低いエントリも
+含められる可能性がある。`--budget` を省略すると、`--plan` は全エントリを（utility 順のまま）
+書き出す:
+
+```bash
+quietset active-review scored.jsonl --plan next_eval_plan.jsonl --budget 20.0
+```
+
+これは knapsack 型の予算配分問題に対する標準的な value-density 貪欲近似であり、大域最適は
+保証されないが、「次のレビュー予算を何に使うべきか」の順位付けとしては妥当なものになる。
 
 ## Rust API
 
