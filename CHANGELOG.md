@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.12.0 — 2026-07-05
+
 ### Added
 - `calibrate --heldout <path>` — measures `achieved_precision`/`precision_ci_low`/
   `precision_ci_high`/`coverage`/`n_keep`/`n_total` on a separate held-out gold-labeled file
