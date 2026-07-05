@@ -435,3 +435,40 @@ chose "enable it" for the game-ai profile specifically. Same pattern already log
 calibration (deferred in one cycle, built when asked by name in a later one) and EV-active-review
 — a deliberate non-change made for backward-compat reasons is a default, not a permanent ban;
 what makes it permanent is the absence of a direct ask, not the original reasoning.
+
+## `cargo publish` packages the working tree, not a git ref — checkout the tag before publishing if anything landed after the release commit
+
+Releasing 0.12.0, the version bump (`cd26345`) and a follow-up feature commit
+(`f8fca26`, active-review target fields) were deliberately kept as two separate commits so the
+tag could point at the bump alone. That's necessary but not sufficient: `git tag v0.12.0
+cd26345 && git push` doesn't change what `main`'s checked-out working tree contains, and `cargo
+publish` has no concept of tags — it packages whatever is on disk. Publishing with `main` still
+at `f8fca26` would have shipped the follow-up commit's code to crates.io under the `0.12.0`
+label, even though the tag and CHANGELOG section describe `cd26345`. Fix: `git checkout
+v0.12.0`, publish from there, then `git checkout main` back. Caught by the user's review before
+it happened, not by a self-check — worth treating "what does `cargo publish` actually read" as
+a standing question whenever a release commit isn't also `HEAD` at publish time.
+
+## A well-researched proposal's final numbered instruction list is the ask — exploratory prose above it may already be self-hedged or dropped
+
+A metrics-provenance request included several paragraphs of "Sprint A–E" exploratory reasoning
+(changing the default `--decision-score` to `lcb`, a new `--truth-model` flag) followed by a
+final numbered list that didn't include either. The user had explicitly hedged the default-change
+idea in the prose itself before dropping it from the final ask. Scoping the plan around the
+prose instead of the final list would have manufactured two confirmation questions (default
+change, new flag) the user had already resolved — advisor caught this before it turned into
+wasted `AskUserQuestion` rounds. Lesson: when a proposal has both discursive reasoning and a
+terminal "here's what to actually do" list, the list is the contract; treat prose-only ideas as
+context, not scope, unless they also appear in the list.
+
+## Verify cross-file markdown anchors against the live-rendered page, not the slugger algorithm from memory
+
+Linking `docs/metrics_ja.md` and `README_ja.md` sections required anchors for headings like
+"安定性スコア（stability_score）" and "reliability コマンド（experimental）" — full-width
+parentheses, mixed Japanese/ASCII, underscores. Recalling GitHub's slug algorithm from memory
+(which punctuation ranges get stripped, whether underscores survive) was unreliable enough to
+be worth not trusting; fetching the already-live `README_ja.md` page and asking for the actual
+`id` attributes on those headings gave exact answers in one call each (e.g. underscores are
+kept, full-width parens are stripped, hyphens only appear where a space existed in the source
+text). For a new heading not yet pushed, the fallback was picking punctuation-free heading text
+instead of guessing the slug — cheaper than being wrong in a shipped doc link.
