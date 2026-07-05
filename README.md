@@ -22,10 +22,25 @@ It is a small stability-filtering primitive designed to compose with other tools
 
 Multiple engines, depths, or seeds evaluate the same position. Keep only positions
 where the evaluation is stable — consistent labels and scores regardless of search parameters.
+`--profile game-ai` already weights signed-score agreement and defaults `--decision-score`
+to `lcb`, so a small centipawn-like magnitude near zero can't masquerade as "stable" when
+its sign is actually flipping under search noise (see `stability_score` below for why raw
+stability alone isn't a keep/drop guarantee). Evaluating with several distinct engines?
+Use `--profile game-ai`. Evaluating with one engine at multiple search depths instead? Use
+`--profile game-ai-single-engine` — same weights, but without a min-evaluators floor that a
+single-engine setup could never satisfy.
 
 ```bash
-quietset score positions.jsonl --profile game-ai > stable_positions.jsonl
+quietset score positions.jsonl --profile game-ai > scored.jsonl
 quietset stable-wrong-risk positions.jsonl  # flag positions stable evaluators consistently mis-label
+
+# Spend additional search budget only on positions worth re-evaluating, not the whole set.
+quietset active-review scored.jsonl --observations positions.jsonl \
+  --plan next_eval_plan.jsonl --budget 2000
+
+# Gate a training run on held-out precision before trusting the kept set.
+quietset calibrate train_gold.jsonl --heldout heldout_gold.jsonl \
+  --target-precision 0.98 --fail-below-target
 ```
 
 ### LLM judge pipelines
@@ -303,6 +318,7 @@ Apply a use-case preset with `--profile` instead of tuning weights manually. Exp
 | `llm-judge` | evaluator ×2, model ×2 | `lcb` |
 | `simulation` | budget ×2, seed ×2 | `adjusted` |
 | `game-ai` | budget ×2, seed ×2, score_sign ×2; min-observations 4, min-budgets 2, min-seeds 2, min-evaluators 2 | `lcb` |
+| `game-ai-single-engine` | same as `game-ai`, but no min-evaluators floor — for one engine evaluated at multiple depths | `lcb` |
 | `benchmark` | label ×2, evaluator ×1.5 | `raw` |
 
 ```bash

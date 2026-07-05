@@ -26,6 +26,13 @@ fn write_temp(name: &str, contents: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn version_flag_reports_cargo_package_version() {
+    let out = run(&["--version"]);
+    assert!(out.status.success());
+    assert!(stdout(&out).contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn score_jsonl_succeeds_on_valid_fixture() {
     let out = run(&["score", "../../tests/fixtures/simple.jsonl"]);
     assert!(out.status.success());
@@ -134,6 +141,125 @@ fn filter_all_invalid_with_skip_invalid_fails_instead_of_silently_succeeding() {
     let out = run(&["filter", path.to_str().unwrap(), "--skip-invalid"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("no records found"));
+}
+
+#[test]
+fn game_ai_profile_keeps_stable_signed_scores() {
+    let path = write_temp(
+        "game_ai_stable_signed.jsonl",
+        "{\"sample_id\":\"stable_signed\",\"budget\":10.0,\"seed\":1,\"evaluator_id\":\"e1\",\"score\":0.35}\n\
+         {\"sample_id\":\"stable_signed\",\"budget\":20.0,\"seed\":2,\"evaluator_id\":\"e2\",\"score\":0.52}\n\
+         {\"sample_id\":\"stable_signed\",\"budget\":10.0,\"seed\":2,\"evaluator_id\":\"e1\",\"score\":0.41}\n\
+         {\"sample_id\":\"stable_signed\",\"budget\":20.0,\"seed\":1,\"evaluator_id\":\"e2\",\"score\":0.44}\n",
+    );
+    let out = run(&["score", path.to_str().unwrap(), "--profile", "game-ai"]);
+    assert!(out.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(stdout(&out).lines().next().unwrap()).unwrap();
+    assert_eq!(value["decision"], "keep");
+}
+
+// game-ai weights score_sign at 2.0 because a shogi-style evaluation whose sign flips
+// under small search perturbations is a worse training signal than one whose magnitude
+// merely varies. Same budget/seed/evaluator spread as stable_signed above -- only the
+// score-sign pattern differs.
+#[test]
+fn game_ai_profile_flags_sign_flip_instability() {
+    let path = write_temp(
+        "game_ai_sign_flip.jsonl",
+        "{\"sample_id\":\"sign_flip\",\"budget\":10.0,\"seed\":1,\"evaluator_id\":\"e1\",\"score\":0.12}\n\
+         {\"sample_id\":\"sign_flip\",\"budget\":20.0,\"seed\":2,\"evaluator_id\":\"e2\",\"score\":-0.08}\n\
+         {\"sample_id\":\"sign_flip\",\"budget\":10.0,\"seed\":2,\"evaluator_id\":\"e1\",\"score\":0.05}\n\
+         {\"sample_id\":\"sign_flip\",\"budget\":20.0,\"seed\":1,\"evaluator_id\":\"e2\",\"score\":-0.03}\n",
+    );
+    let out = run(&["score", path.to_str().unwrap(), "--profile", "game-ai"]);
+    assert!(out.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(stdout(&out).lines().next().unwrap()).unwrap();
+    assert_ne!(value["decision"], "keep");
+}
+
+// budget swing correlates with the sign flip while seed is assigned orthogonally to it,
+// isolating budget_stability as the dominant weighted deficit rather than seed noise.
+#[test]
+fn game_ai_profile_flags_budget_flip_instability() {
+    let path = write_temp(
+        "game_ai_budget_flip.jsonl",
+        "{\"sample_id\":\"budget_flip\",\"budget\":10.0,\"seed\":1,\"evaluator_id\":\"e1\",\"score\":0.40}\n\
+         {\"sample_id\":\"budget_flip\",\"budget\":10.0,\"seed\":2,\"evaluator_id\":\"e2\",\"score\":0.38}\n\
+         {\"sample_id\":\"budget_flip\",\"budget\":100.0,\"seed\":1,\"evaluator_id\":\"e2\",\"score\":-0.42}\n\
+         {\"sample_id\":\"budget_flip\",\"budget\":100.0,\"seed\":2,\"evaluator_id\":\"e1\",\"score\":-0.36}\n",
+    );
+    let out = run(&["score", path.to_str().unwrap(), "--profile", "game-ai"]);
+    assert!(out.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(stdout(&out).lines().next().unwrap()).unwrap();
+    assert_ne!(value["decision"], "keep");
+}
+
+// Same seed-alternating pattern as active_review_observations_populates_target_seed_for_add_seed_action
+// below, with a fixed budget and two evaluators added so it also clears game-ai's other
+// minimums -- confirms seed instability alone demotes a sample under this stricter profile,
+// and that the resulting active-review recommendation still targets add_seed.
+#[test]
+fn game_ai_profile_flags_seed_sensitivity_and_targets_add_seed() {
+    let obs_text = "{\"sample_id\":\"pricey\",\"label\":\"win\",\"budget\":4.0,\"seed\":0,\"evaluator_id\":\"e1\",\"score\":0.9}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"budget\":4.0,\"seed\":1,\"evaluator_id\":\"e2\",\"score\":0.1}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"budget\":4.0,\"seed\":0,\"evaluator_id\":\"e2\",\"score\":0.9}\n\
+         {\"sample_id\":\"pricey\",\"label\":\"win\",\"budget\":4.0,\"seed\":1,\"evaluator_id\":\"e1\",\"score\":0.1}\n";
+    let obs_path = write_temp("game_ai_seed_sensitive.jsonl", obs_text);
+
+    let scored = run(&["score", obs_path.to_str().unwrap(), "--profile", "game-ai"]);
+    assert!(scored.status.success());
+    let scored_text = stdout(&scored);
+    let value: serde_json::Value =
+        serde_json::from_str(scored_text.lines().next().unwrap()).unwrap();
+    assert_ne!(value["decision"], "keep");
+
+    let scored_path = write_temp("game_ai_seed_sensitive_scored.jsonl", &scored_text);
+    let out = run(&[
+        "active-review",
+        scored_path.to_str().unwrap(),
+        "--observations",
+        obs_path.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let review_value: serde_json::Value =
+        serde_json::from_str(stdout(&out).lines().next().unwrap()).unwrap();
+    assert_eq!(review_value["suggested_action"], "add_seed");
+    assert_eq!(review_value["target_seed"], 2);
+}
+
+// Single-engine, multi-depth data: one distinct evaluator_id. --profile game-ai's
+// min-evaluators-keep floor of 2 can never be satisfied by this shape, silently
+// demoting an otherwise-stable sample to review; --profile game-ai-single-engine
+// drops that floor to 0 since depth (budget), not evaluator identity, is what varies.
+#[test]
+fn game_ai_single_engine_profile_keeps_what_game_ai_profile_wrongly_demotes() {
+    let path = write_temp(
+        "game_ai_single_engine.jsonl",
+        "{\"sample_id\":\"one_engine\",\"budget\":10.0,\"seed\":1,\"evaluator_id\":\"sekirei\",\"score\":0.35}\n\
+         {\"sample_id\":\"one_engine\",\"budget\":20.0,\"seed\":2,\"evaluator_id\":\"sekirei\",\"score\":0.52}\n\
+         {\"sample_id\":\"one_engine\",\"budget\":10.0,\"seed\":2,\"evaluator_id\":\"sekirei\",\"score\":0.41}\n\
+         {\"sample_id\":\"one_engine\",\"budget\":20.0,\"seed\":1,\"evaluator_id\":\"sekirei\",\"score\":0.44}\n",
+    );
+
+    let under_game_ai = run(&["score", path.to_str().unwrap(), "--profile", "game-ai"]);
+    assert!(under_game_ai.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(stdout(&under_game_ai).lines().next().unwrap()).unwrap();
+    assert_ne!(value["decision"], "keep");
+
+    let under_single_engine = run(&[
+        "score",
+        path.to_str().unwrap(),
+        "--profile",
+        "game-ai-single-engine",
+    ]);
+    assert!(under_single_engine.status.success());
+    let value_single: serde_json::Value =
+        serde_json::from_str(stdout(&under_single_engine).lines().next().unwrap()).unwrap();
+    assert_eq!(value_single["decision"], "keep");
 }
 
 fn gold_labeled_fixture() -> std::path::PathBuf {
@@ -383,6 +509,97 @@ fn active_review_observations_populates_target_seed_for_add_seed_action() {
     assert!(value_with_obs.get("target_budget").is_none());
     assert!(value_with_obs.get("target_evaluator_slot").is_none());
     assert!(value_with_obs.get("target_model_slot").is_none());
+}
+
+#[test]
+fn active_review_observations_populates_target_budget_for_increase_budget_action() {
+    // budget swing (0.1 at budget 2 vs 0.9 at budget 4) makes budget_sensitivity the
+    // dominant signal over the unavoidable competing score_mad signal.
+    let obs_text = "{\"sample_id\":\"s_budget\",\"score\":0.1,\"budget\":2.0}\n\
+         {\"sample_id\":\"s_budget\",\"score\":0.9,\"budget\":4.0}\n";
+    let obs_path = write_temp("active_review_targets_budget_obs.jsonl", obs_text);
+
+    let scored = run(&["score", obs_path.to_str().unwrap()]);
+    assert!(scored.status.success());
+    let scored_path = write_temp(
+        "active_review_targets_budget_scored.jsonl",
+        &stdout(&scored),
+    );
+
+    let out = run(&[
+        "active-review",
+        scored_path.to_str().unwrap(),
+        "--observations",
+        obs_path.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(stdout(&out).lines().next().unwrap()).unwrap();
+    assert_eq!(value["suggested_action"], "increase_budget");
+    assert_eq!(
+        value["target_budget"], 8.0,
+        "target_budget should be max observed budget (4.0) x 2"
+    );
+}
+
+#[test]
+fn active_review_observations_populates_target_evaluator_slot_for_add_evaluator_action() {
+    // 50/50 label split across two evaluators maximizes label_entropy, which dominates
+    // over label_agreement_lcb here.
+    let obs_text = "{\"sample_id\":\"s_evaluator\",\"label\":\"win\",\"evaluator_id\":\"e1\"}\n\
+         {\"sample_id\":\"s_evaluator\",\"label\":\"win\",\"evaluator_id\":\"e1\"}\n\
+         {\"sample_id\":\"s_evaluator\",\"label\":\"loss\",\"evaluator_id\":\"e2\"}\n\
+         {\"sample_id\":\"s_evaluator\",\"label\":\"loss\",\"evaluator_id\":\"e2\"}\n";
+    let obs_path = write_temp("active_review_targets_evaluator_obs.jsonl", obs_text);
+
+    let scored = run(&["score", obs_path.to_str().unwrap()]);
+    assert!(scored.status.success());
+    let scored_path = write_temp(
+        "active_review_targets_evaluator_scored.jsonl",
+        &stdout(&scored),
+    );
+
+    let out = run(&[
+        "active-review",
+        scored_path.to_str().unwrap(),
+        "--observations",
+        obs_path.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(stdout(&out).lines().next().unwrap()).unwrap();
+    assert_eq!(value["suggested_action"], "add_evaluator");
+    assert_eq!(
+        value["target_evaluator_slot"], 3,
+        "target_evaluator_slot should be distinct evaluator count (2) + 1"
+    );
+}
+
+#[test]
+fn active_review_observations_populates_target_model_slot_for_add_model_action() {
+    // no label/budget/seed fields at all, so score_mad is the only live signal.
+    let obs_text = "{\"sample_id\":\"s_model\",\"score\":0.1,\"model_id\":\"m1\"}\n\
+         {\"sample_id\":\"s_model\",\"score\":0.9,\"model_id\":\"m2\"}\n";
+    let obs_path = write_temp("active_review_targets_model_obs.jsonl", obs_text);
+
+    let scored = run(&["score", obs_path.to_str().unwrap()]);
+    assert!(scored.status.success());
+    let scored_path = write_temp("active_review_targets_model_scored.jsonl", &stdout(&scored));
+
+    let out = run(&[
+        "active-review",
+        scored_path.to_str().unwrap(),
+        "--observations",
+        obs_path.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(stdout(&out).lines().next().unwrap()).unwrap();
+    assert_eq!(value["suggested_action"], "add_model");
+    assert_eq!(
+        value["target_model_slot"], 3,
+        "target_model_slot should be distinct model count (2) + 1"
+    );
 }
 
 #[test]

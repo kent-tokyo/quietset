@@ -16,11 +16,19 @@ quietset はモデルの訓練ツールでも、アノテーションプラッ�
 
 ### ゲーム AI / 探索学習データ
 
-複数エンジン・探索深さ・seed で同じ局面を評価し、評価値やラベルが安定している局面だけを学習データに残す。
+複数エンジン・探索深さ・seed で同じ局面を評価し、評価値やラベルが安定している局面だけを学習データに残す。`--profile game-ai` は評価値の符号一致も重み付けし、`--decision-score` は自動的に `lcb` になるため、ゼロ付近の小さな評価値が探索ノイズで符号反転しているのに「安定」と誤判定されることを防ぐ（生の stability_score だけでは keep/drop の保証にならない理由は後述の `stability_score` を参照）。複数の異なるエンジンで評価する場合は `--profile game-ai` を、1エンジンを複数の探索深さで評価する場合は `--profile game-ai-single-engine` を使う — 重みは同じだが、1エンジン構成では満たせない最低evaluator数の下限がない。
 
 ```bash
-quietset score positions.jsonl --profile game-ai > stable_positions.jsonl
+quietset score positions.jsonl --profile game-ai > scored.jsonl
 quietset stable-wrong-risk positions.jsonl  # 安定して誤ラベルの局面を検出
+
+# 全局面を再評価する代わりに、追加探索する価値がある局面だけに budget を割り当てる。
+quietset active-review scored.jsonl --observations positions.jsonl \
+  --plan next_eval_plan.jsonl --budget 2000
+
+# 学習前に、held-out データでの精度が基準を満たすかをゲートする。
+quietset calibrate train_gold.jsonl --heldout heldout_gold.jsonl \
+  --target-precision 0.98 --fail-below-target
 ```
 
 ### LLM judge パイプライン
@@ -267,6 +275,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `llm-judge` | evaluator ×2、model ×2 | `lcb` |
 | `simulation` | budget ×2、seed ×2 | `adjusted` |
 | `game-ai` | budget ×2、seed ×2、score_sign ×2、最低観測数 4、最低budget数 2、最低seed数 2、最低evaluator数 2 | `lcb` |
+| `game-ai-single-engine` | `game-ai` と同じ重みだが最低evaluator数の下限なし — 1エンジンを複数深さで評価する場合向け | `lcb` |
 | `benchmark` | label ×2、evaluator ×1.5 | `raw` |
 
 ```bash

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added
+- README.md/README_ja.md: "Game AI / search training data" use case now shows the full
+  recommended pipeline (`score --profile game-ai` → `stable-wrong-risk` → `active-review
+  --observations --plan --budget` → `calibrate --heldout --fail-below-target`) instead of a
+  single `score` line, and notes that `--profile game-ai` already defaults `--decision-score`
+  to `lcb`
+- `crates/quietset-cli/tests/cli.rs`: `--profile game-ai` gains its first CLI-level test
+  coverage (stable-signed-score keep, sign-flip/budget-flip/seed-flip instability, each demoted
+  by the specific profile weight it's designed to catch), and `active-review --observations`
+  gains coverage for the `target_budget`/`target_evaluator_slot`/`target_model_slot` fields
+  (previously only `target_seed` had a test)
+- `--version`/`-V` now report the installed build (`quietset <version>`) — previously the only
+  way to check which build was installed was `cargo install --list` or a reinstall
+- New `--profile game-ai-single-engine`: same weights as `game-ai` (budget/seed/score_sign ×2,
+  `--decision-score lcb`, min-observations 4, min-budgets 2, min-seeds 2), but without
+  `game-ai`'s min-evaluators-keep floor of 2. That floor is unconditional under `--profile
+  game-ai` (only ever raised via `.max()`, never lowered by a CLI flag), so a single-engine,
+  multiple-search-depth dataset — one evaluator, varying `budget` — could never reach 2
+  distinct evaluators and had every otherwise-stable sample silently demoted from Keep to
+  Review
+
 ## 0.13.0 — 2026-07-05
 
 ### Added

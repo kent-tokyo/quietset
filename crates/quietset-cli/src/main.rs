@@ -17,7 +17,11 @@ use quietset::{
 };
 
 #[derive(Parser)]
-#[command(name = "quietset", about = "Filter datasets by label stability")]
+#[command(
+    name = "quietset",
+    about = "Filter datasets by label stability",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -70,6 +74,10 @@ enum ProfileArg {
     Simulation,
     /// Game/search AI: weight budget 2×, seed 2×; default decision-score lcb; min-observations 4, min-budgets 2, min-seeds 2, min-evaluators 2.
     GameAi,
+    /// Game/search AI, single engine: same weights as `game-ai`, but for one engine
+    /// varying only budget/seed (e.g. one shogi engine searched at multiple depths) —
+    /// no min-evaluators floor, since evaluator identity isn't the varying axis here.
+    GameAiSingleEngine,
     /// Benchmark curation: weight label 2×, evaluator 1.5×; default decision-score raw.
     Benchmark,
 }
@@ -894,6 +902,12 @@ fn run_score(args: ScoreArgs) -> Result<()> {
             score_sign: 2.0,
             ..ScoreWeights::default()
         },
+        Some(ProfileArg::GameAiSingleEngine) => ScoreWeights {
+            budget_stability: 2.0,
+            seed_stability: 2.0,
+            score_sign: 2.0,
+            ..ScoreWeights::default()
+        },
         Some(ProfileArg::Benchmark) => ScoreWeights {
             label_agreement: 2.0,
             evaluator_agreement: 1.5,
@@ -905,12 +919,17 @@ fn run_score(args: ScoreArgs) -> Result<()> {
         Some(ProfileArg::LlmJudge) => Some(DecisionScoreArg::Lcb),
         Some(ProfileArg::Simulation) => Some(DecisionScoreArg::Adjusted),
         Some(ProfileArg::GameAi) => Some(DecisionScoreArg::Lcb),
+        Some(ProfileArg::GameAiSingleEngine) => Some(DecisionScoreArg::Lcb),
         _ => None,
     };
     let is_game_ai = matches!(args.profile, Some(ProfileArg::GameAi));
-    let profile_min_obs: usize = if is_game_ai { 4 } else { 0 };
-    let profile_min_budgets: usize = if is_game_ai { 2 } else { 0 };
-    let profile_min_seeds: usize = if is_game_ai { 2 } else { 0 };
+    let is_game_ai_like = matches!(
+        args.profile,
+        Some(ProfileArg::GameAi) | Some(ProfileArg::GameAiSingleEngine)
+    );
+    let profile_min_obs: usize = if is_game_ai_like { 4 } else { 0 };
+    let profile_min_budgets: usize = if is_game_ai_like { 2 } else { 0 };
+    let profile_min_seeds: usize = if is_game_ai_like { 2 } else { 0 };
     let profile_min_evaluators: usize = if is_game_ai { 2 } else { 0 };
     let config = ScoreConfig {
         score_scale: args.score_scale,
