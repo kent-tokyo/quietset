@@ -217,6 +217,16 @@ quietsetコマンドにパイプする予定があるなら、`csv`ではなく�
 - `1.0` = 非常に安定
 - `0.0` = 非常に不安定
 
+`stability_score` は**ランキング・確認用の convenience aggregate であり、キャリブレーション
+された確率でも正しさの保証でもありません**。それ自体に不確実性モデルを持たないため、
+全評価者が一貫して間違った答えに合意しているサンプルでも `1.0` になります。実際の
+accept/reject の判断には、生の `stability_score`/`--keep-threshold` のデフォルトではなく、
+統計的・モデルベースの根拠を持つ指標 — `label_agreement_lcb`（Wilson interval）、
+`--decision-score latent-truth`（Dawid-Skene EM）、`gold-weighted`、または
+`calibrate --heldout` で選んだ閾値 — を優先してください。以下の各フィールドの完全な
+出典については [これらの数値の根拠](#これらの数値の根拠) と
+[docs/metrics_ja.md](docs/metrics_ja.md) を参照してください。
+
 利用可能なサブスコアの**加重平均**として計算されます（すべて `[0.0, 1.0]`）。
 
 | コンポーネント | 意味 |
@@ -347,6 +357,17 @@ demote します — これらは不確実性のシグナルであって間違�
 | スコア >= 0.85 | `keep`（採用） |
 | スコア <= 0.40 | `drop`（除外） |
 | それ以外 | `review`（要確認） |
+
+これは *selective classification* / *reject option* / risk-coverage のトレードオフに
+対応します: すべてのサンプルを無理やりどちらかに分類するのではなく、不確かなものを
+review に回すことで、実際に採用する範囲のリスクを制御します。`keep` = accept、
+`review` = abstain/defer、`drop` = 学習用途としての reject。`calibrate`/`policy` は
+これを実務化したものです（[calibrate コマンド](#calibrate-コマンド) 参照）が、閾値は
+1つの gold-labeled サンプルに対して経験的に選ばれるものであり、conformal のような
+厳密な保証ではありません。より誠実な（それでも経験的な）精度推定には `--heldout` を
+使ってください。詳細は
+[docs/metrics_ja.md](docs/metrics_ja.md#calibrate-と-policy-は-selective-classification-である)
+を参照。
 
 `--keep-threshold` と `--drop-threshold` で閾値を変更できます。`--confidence-level` で
 Wilson LCB の信頼水準を調整できます（デフォルト 0.95）。
@@ -948,6 +969,54 @@ print(result)
 バインディングは現在 `score_jsonl` という単一の関数のみを公開しており、JSONL 文字列をデフォルト設定でスコアリングして
 JSONL 文字列を返す。CLI が全コマンド・全オプションを備えた安定インターフェースであり、Python バインディングは
 サブプロセス起動が難しい既存の Python パイプラインに簡易スコアリングを組み込む用途向け。
+
+## これらの数値の根拠
+
+quietset は単一の論文の実装ではありません。サンプルごとの基礎指標の多くは既存の、名前の付いた
+統計量です。一方で `stability_score` とそれを組み合わせた keep/review/drop の判定ポリシーは
+quietset 独自の設計であり、理論的な保証ではありません。この表はコンパクトな分類です —
+各指標の完全な数式・前提・failure mode は [docs/metrics_ja.md](docs/metrics_ja.md) を
+参照してください。
+
+**既存の統計量**（忠実な実装。完全な数式はリンク先の各セクションを参照）:
+
+| フィールド | 根拠 |
+|-----------|------|
+| `label_agreement_lcb` | Wilson score interval の下側信頼限界 — [安定性スコア](#安定性スコアstability_score) 参照 |
+| `fleiss_kappa` | Fleiss' kappa（サブジェクトごとの評価者数が可変な場合に一般化） — [reliability](#reliability-コマンドexperimental) 参照 |
+| `krippendorff_alpha` | Krippendorff's alpha（nominal ラベル向けバリアント） — [reliability](#reliability-コマンドexperimental) 参照 |
+| `label_entropy` | そのサンプルで観測されたラベルに対する正規化 Shannon entropy — [安定性スコア](#安定性スコアstability_score) 参照 |
+| `score_std` / `score_mad` / `score_iqr` | 母標準偏差 / 中央値ベースの MAD / 線形補間による IQR — [安定性スコア](#安定性スコアstability_score) 参照 |
+
+**モデルベースの推定量:**
+
+| フィールド | 根拠 |
+|-----------|------|
+| `latent_truth_*` | Dawid-Skene 系 EM — 評価者ごとの混同行列とラベル事後分布を `gold_label` なしで推定する。`evaluator_effective_n` と `correlated_evaluator_warning` は、収束した EM の出力の上に quietset が独自に追加した診断指標であり、オリジナルの Dawid-Skene 手法の一部ではない — [判定](#判定decision) 参照 |
+
+**経験的診断指標**（`gold_label` に対して直接計測。モデル化はしていない）:
+
+| フィールド | 根拠 |
+|-----------|------|
+| `stable_wrong_rate_among_keep` | 直接計測される経験的な率 — [stable-wrong-risk](#stable-wrong-risk-コマンド) 参照 |
+| `stable-wrong-risk --breakdown` | 同じ率を evaluator/model/budget 別に集計したもの — [stable-wrong-risk](#stable-wrong-risk-コマンド) 参照 |
+
+**quietset 独自のヒューリスティック**（上記を組み合わせて運用上の判定にしたもの。単体では
+引用可能な統計手法ではない）:
+
+| フィールド | 根拠 |
+|-----------|------|
+| `stability_score` | 上記サブスコアの加重平均 — [安定性スコア](#安定性スコアstability_score) 参照 |
+| `confidence` / `adjusted_stability_score` | 証拠数に基づく中立値 0.5 への shrinkage — [confidence と adjusted_stability_score](#confidence-と-adjusted_stability_score) 参照 |
+| `score_sign_agreement` | 符号付き・ゼロ中心のスコア向けの実務寄り補完指標 — [安定性スコア](#安定性スコアstability_score) 参照 |
+| `keep`/`drop` 閾値（0.85 / 0.40） | 運用上のデフォルト値であり、数式から導出された定数ではない — [判定](#判定decision) 参照 |
+
+`calibrate`/`policy` は selective prediction / risk-coverage（reject option）の考え方に近いです
+（不確かなサンプルを reject して review に回すことで、採用範囲のリスクを下げる）。ただし
+**conformal prediction のような厳密な保証ではありません**。閾値は1つの gold-labeled サンプルに
+対して経験的に選ばれるため、`achieved_precision` は「証明された値」ではなく「計測された値」として
+扱ってください。詳細は [calibrate](#calibrate-コマンド) の in-sample-optimism に関する `note` と
+`--heldout` の説明を参照。
 
 ## 類似ツールとの比較
 

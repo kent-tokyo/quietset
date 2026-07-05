@@ -235,6 +235,16 @@ The `stability_score` is a value in `[0.0, 1.0]`:
 - `1.0` = highly stable
 - `0.0` = highly unstable
 
+`stability_score` is a **convenience aggregate for ranking and inspection — not a calibrated
+probability and not a correctness guarantee**. It has no uncertainty model of its own; a sample
+where every evaluator consistently agrees on a wrong answer still scores `1.0`. For real
+accept/reject decisions, prefer a component with an actual statistical or model-based basis —
+`label_agreement_lcb` (Wilson interval), `--decision-score latent-truth` (Dawid-Skene EM),
+`gold-weighted`, or a threshold picked by `calibrate --heldout` — over the raw
+`stability_score`/`--keep-threshold` default. See
+[Where these numbers come from](#where-these-numbers-come-from) and
+[docs/metrics.md](docs/metrics.md) for the full provenance of every field below.
+
 It is the **weighted mean** of available sub-scores (all in `[0.0, 1.0]`):
 
 | Component | Value |
@@ -365,6 +375,14 @@ reading `decision`.
 | score >= 0.85 | keep |
 | score <= 0.40 | drop |
 | otherwise | review |
+
+This maps onto *selective classification* / *reject option* / risk-coverage tradeoffs: rather
+than forcing every sample into a class, uncertain ones are routed to review to control the risk
+of what's actually accepted. `keep` = accept, `review` = abstain/defer, `drop` = reject for
+training use. `calibrate`/`policy` operationalize this — see
+[calibrate](#calibrate-command) — but they pick a threshold empirically against one gold-labeled
+sample, not a conformal-style formal guarantee; use `--heldout` for a more honest (still
+empirical) precision estimate. Full discussion: [docs/metrics.md](docs/metrics.md#calibrate-and-policy-as-selective-classification).
 
 The defaults — 0.85 keep, 0.40 drop — were chosen to leave a deliberate review band.
 0.85 requires strong agreement across most observations before a sample is trusted;
@@ -996,6 +1014,53 @@ for obs in observations {
 }
 if let Some(report) = scorer.flush() { println!("{:?}", report.decision); }
 ```
+
+## Where these numbers come from
+
+quietset is not an implementation of one paper. Most of its per-sample building blocks are
+standard, named statistics; `stability_score` and the keep/review/drop policy built on top of
+them are quietset's own design — useful, but not a theoretical guarantee. This table is a
+compact classification; for the full formula, assumptions, and failure modes behind each
+metric, see [docs/metrics.md](docs/metrics.md).
+
+**Established statistics** (faithful implementations, full formulas in the sections linked):
+
+| Field | Basis |
+|-------|-------|
+| `label_agreement_lcb` | Wilson score interval lower bound — see [Stability score](#stability-score) |
+| `fleiss_kappa` | Fleiss' kappa, generalized to variable raters per subject — see [reliability](#reliability-command-experimental) |
+| `krippendorff_alpha` | Krippendorff's alpha, nominal-labels variant — see [reliability](#reliability-command-experimental) |
+| `label_entropy` | Normalized Shannon entropy over the labels observed for that sample — see [Stability score](#stability-score) |
+| `score_std` / `score_mad` / `score_iqr` | Population standard deviation / median-based MAD / linear-interpolation IQR — see [Stability score](#stability-score) |
+
+**Model-based estimator:**
+
+| Field | Basis |
+|-------|-------|
+| `latent_truth_*` | Dawid-Skene-style EM — per-evaluator confusion matrix + label posterior, fit with no `gold_label` needed. `evaluator_effective_n` and `correlated_evaluator_warning` are quietset's own diagnostics computed on top of the converged EM output, not part of the original Dawid-Skene method — see [Decisions](#decisions) |
+
+**Empirical diagnostics** (measured directly against `gold_label`, not modeled):
+
+| Field | Basis |
+|-------|-------|
+| `stable_wrong_rate_among_keep` | Direct empirical rate — see [stable-wrong-risk](#stable-wrong-risk-command) |
+| `stable-wrong-risk --breakdown` | Same rate, grouped by evaluator/model/budget — see [stable-wrong-risk](#stable-wrong-risk-command) |
+
+**quietset-specific heuristics** (compose the above into an operational decision — not citable
+statistical methods on their own):
+
+| Field | Basis |
+|-------|-------|
+| `stability_score` | Weighted mean of the sub-scores above — see [Stability score](#stability-score) |
+| `confidence` / `adjusted_stability_score` | Evidence-count shrinkage toward neutral 0.5 — see [Confidence and adjusted score](#confidence-and-adjusted-score) |
+| `score_sign_agreement` | Domain-aware complement metric for signed, zero-centered scores — see [Stability score](#stability-score) |
+| `keep` / `drop` thresholds (0.85 / 0.40) | Operational defaults, not derived constants — see [Decisions](#decisions) |
+
+`calibrate`/`policy` are conceptually close to selective-prediction / risk-coverage ideas
+(reject uncertain samples to review rather than forcing a keep-or-drop call on everything) —
+but they are **not** a conformal-style formal guarantee. A threshold is chosen empirically
+against one gold-labeled sample, so treat `achieved_precision` as *measured*, not *proven*; see
+the in-sample-optimism `note` and `--heldout` explanation in [calibrate](#calibrate-command).
 
 ## Compared to adjacent tools
 

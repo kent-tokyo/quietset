@@ -20,7 +20,13 @@ fn normal_quantile(p: f64) -> f64 {
     if p < 0.5 { -x } else { x }
 }
 
-/// Two-sided Wilson score interval for a binomial proportion `successes / trials`.
+/// Two-sided Wilson score interval for a binomial proportion `successes / trials`. Wilson,
+/// not the simpler normal (Wald) approximation `p ± z*sqrt(p(1-p)/n)`: Wald's interval can
+/// extend outside `[0, 1]` and collapses to zero width at `p = 0` or `p = 1` regardless of `n`
+/// — exactly the small-`n`, extreme-proportion regime this function is used for (a handful of
+/// observations, often unanimous). Wilson stays well-behaved there because it inverts the
+/// normal approximation to the binomial test rather than approximating the proportion's
+/// standard error directly.
 pub(crate) fn wilson_ci(successes: usize, trials: usize, confidence_level: f64) -> (f64, f64) {
     if trials == 0 {
         return (0.0, 0.0);

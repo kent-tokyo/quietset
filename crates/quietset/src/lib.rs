@@ -188,6 +188,12 @@ pub fn score_all_latent_truth(
             report.latent_truth_converged = Some(estimate.converged);
             report.latent_truth_iterations = Some(estimate.iterations);
             report.latent_truth_convergence_delta = Some(estimate.convergence_delta);
+            // Only ever demotes Keep -> Review, never to Drop: correlated_evaluator_warning,
+            // a low evaluator_effective_n, and non-convergence are all uncertainty signals
+            // about EM's own fit, not evidence that the label itself is wrong. Dropping here
+            // would treat "the model isn't sure" the same as "the model is sure it's wrong",
+            // which would discard potentially-correct samples based on a diagnostic that's
+            // deliberately conservative by design.
             if report.decision == Decision::Keep
                 && let Some(reason) = latent_truth::latent_truth_demotion_reason(
                     estimate,
