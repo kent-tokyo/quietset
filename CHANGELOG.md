@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.13.0 — 2026-07-05
+
 ### Added
 - `active-review` gains `--observations <path>` and, when supplied, per-entry
   `target_budget`/`target_seed`/`target_evaluator_slot`/`target_model_slot` fields sizing a
