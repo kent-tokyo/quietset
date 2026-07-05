@@ -1,5 +1,7 @@
 # quietset
 
+**English** | [日本語](README_ja.md)
+
 [![CI](https://github.com/kent-tokyo/quietset/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/quietset/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/quietset.svg)](https://crates.io/crates/quietset)
 [![docs.rs](https://docs.rs/quietset/badge.svg)](https://docs.rs/quietset)
