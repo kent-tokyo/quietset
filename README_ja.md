@@ -139,10 +139,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 
 ## 出力フォーマット
 
-出力の慣習はコマンドごとに意図的に異なる。人間による確認を主目的とするコマンドと、パイプライン合成
-を主目的とするコマンド（[`select`](#select-コマンド)や[`--embed-stats`](#audit-コマンド)を参照）が
-混在しているためで、単一の統一フォーマットは存在しない。スクリプトを書く前に以下の表で各コマンドの
-出力形状を確認すること:
+出力の慣習はコマンドごとに意図的に異なる。人間による確認を主目的とするコマンドと、パイプライン合成を主目的とするコマンド（[`select`](#select-コマンド)や[`--embed-stats`](#audit-コマンド)を参照）が混在しているためで、単一の統一フォーマットは存在しない。スクリプトを書く前に以下の表で各コマンドの出力形状を確認すること:
 
 | コマンド | デフォルト | フラグ | 備考 |
 |---------|-----------|--------|------|
@@ -160,12 +157,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `audit` | text | `--json`（単一のpretty JSONオブジェクト） | |
 | `policy` | textテーブル | `--output-format text\|json\|csv`（旧`--json`は`json`のエイリアスとして引き続き使用可） | `json`はJSONL(閾値ごとに1行)、`csv`は固定列(`gold_label`が無い場合は空セル) | |
 
-**CSVはパイプ用途では行き止まり。** `score --output-format csv`、`calibrate --output-format csv`、
-`policy --output-format csv`はスプレッドシート/BIツール向けのエクスポート専用。他のどのquietset
-コマンドもCSVを読み戻せない（`filter`/`summary`/`explain`/`compare`/`audit`/`select`/
-`recommend`/`active-review`はいずれもJSONL形式の`StabilityReport`を期待し、`stable-wrong-risk`/
-`calibrate`/`reliability`/`policy`はJSONL形式の`Observation`を期待する）。`score`の出力を他の
-quietsetコマンドにパイプする予定があるなら、`csv`ではなくデフォルトの`jsonl`を使うこと。
+**CSVはパイプ用途では行き止まり。** `score --output-format csv`、`calibrate --output-format csv`、`policy --output-format csv`はスプレッドシート/BIツール向けのエクスポート専用。他のどのquietsetコマンドもCSVを読み戻せない（`filter`/`summary`/`explain`/`compare`/`audit`/`select`/`recommend`/`active-review`はいずれもJSONL形式の`StabilityReport`を期待し、`stable-wrong-risk`/`calibrate`/`reliability`/`policy`はJSONL形式の`Observation`を期待する）。`score`の出力を他のquietsetコマンドにパイプする予定があるなら、`csv`ではなくデフォルトの`jsonl`を使うこと。
 
 ## 入力 JSONL フォーマット
 
@@ -217,15 +209,7 @@ quietsetコマンドにパイプする予定があるなら、`csv`ではなく�
 - `1.0` = 非常に安定
 - `0.0` = 非常に不安定
 
-`stability_score` は**ランキング・確認用の convenience aggregate であり、キャリブレーション
-された確率でも正しさの保証でもありません**。それ自体に不確実性モデルを持たないため、
-全評価者が一貫して間違った答えに合意しているサンプルでも `1.0` になります。実際の
-accept/reject の判断には、生の `stability_score`/`--keep-threshold` のデフォルトではなく、
-統計的・モデルベースの根拠を持つ指標 — `label_agreement_lcb`（Wilson interval）、
-`--decision-score latent-truth`（Dawid-Skene EM）、`gold-weighted`、または
-`calibrate --heldout` で選んだ閾値 — を優先してください。以下の各フィールドの完全な
-出典については [これらの数値の根拠](#これらの数値の根拠) と
-[docs/metrics_ja.md](docs/metrics_ja.md) を参照してください。
+`stability_score` は**ランキング・確認用の convenience aggregate であり、キャリブレーションされた確率でも正しさの保証でもありません**。それ自体に不確実性モデルを持たないため、全評価者が一貫して間違った答えに合意しているサンプルでも `1.0` になります。実際の accept/reject の判断には、生の `stability_score`/`--keep-threshold` のデフォルトではなく、統計的・モデルベースの根拠を持つ指標 — `label_agreement_lcb`（Wilson interval）、`--decision-score latent-truth`（Dawid-Skene EM）、`gold-weighted`、または `calibrate --heldout` で選んだ閾値 — を優先してください。以下の各フィールドの完全な出典については [これらの数値の根拠](#これらの数値の根拠) と [docs/metrics_ja.md](docs/metrics_ja.md) を参照してください。
 
 利用可能なサブスコアの**加重平均**として計算されます（すべて `[0.0, 1.0]`）。
 
@@ -239,8 +223,7 @@ accept/reject の判断には、生の `stability_score`/`--keep-threshold` の�
 | `evaluator_agreement` | 評価者間のラベル一致度 |
 | `score_sign_agreement` | 数値スコアの多数派符号が占める割合 — デフォルトの重みは `0`（除外）。`--weight-score-sign` で有効化できる（`--profile game-ai` はデフォルトで `×2` 有効） |
 
-対応するフィールドがない次元（例：ラベルなし、budget なし）は平均から除外されます。
-観測が1件のみのサンプルは `stability_score = 0.5`（デフォルトで `review`）になります。
+対応するフィールドがない次元（例：ラベルなし、budget なし）は平均から除外されます。観測が1件のみのサンプルは `stability_score = 0.5`（デフォルトで `review`）になります。
 
 追加の診断フィールド:
 
@@ -277,8 +260,7 @@ accept/reject の判断には、生の `stability_score`/`--keep-threshold` の�
 
 ## プロファイル
 
-手動で重みを調整する代わりに、`--profile` でユースケースプリセットを適用できます。
-明示的な `--weight-*` / `--decision-score` はプリセットより優先されます。
+手動で重みを調整する代わりに、`--profile` でユースケースプリセットを適用できます。明示的な `--weight-*` / `--decision-score` はプリセットより優先されます。
 
 | プロファイル | 重み変更 | デフォルト decision-score |
 |------------|--------|------------------------|
@@ -311,8 +293,7 @@ quietset score input.jsonl --profile simulation --weight-budget 3.0 > scored.jso
 
 例: `stability_score = 0.95` でも観測2件なら `adjusted_stability_score ≈ 0.68` — keep 閾値（0.85）に達しにくくなります。
 
-`--use-adjusted-score` フラグで adjusted score ベースの判定に切り替えられます。
-`--confidence-k` で収束速度を調整できます。
+`--use-adjusted-score` フラグで adjusted score ベースの判定に切り替えられます。`--confidence-k` で収束速度を調整できます。
 
 ## keep 判定の最低観測条件
 
@@ -338,19 +319,7 @@ quietset score input.jsonl \
 | `--decision-score gold-weighted` | — | `stability_score`（ラベル部分を信頼性で重み付け） | 生の多数決の代わりに `gold_label` の一致履歴に基づく信頼性重み付き投票を使用。バッチ全体に `gold_label` が一つも無い場合は `raw` と同一の挙動になる。 |
 | `--decision-score latent-truth` | — | `stability_score`（ラベル部分をEMで重み付け） | 生の多数決の代わりに Dawid-Skene EM が推定した投票を使用 — `gold_label` なしで、不一致パターンだけから評価者ごとの信頼性を推定する。バッチ全体で評価者またはラベルの種類が2未満の場合は `raw` と同一の挙動になる。出力に `latent_truth_label`、`latent_truth_confidence`、`latent_truth_label_distribution`、`majority_latent_conflict`、`evaluator_effective_n`、`correlated_evaluator_warning`、`latent_truth_converged`、`latent_truth_iterations`、`latent_truth_convergence_delta`、`latent_truth_demotion_reason` が追加される。`latent_truth_confidence` はEMが当てはめた事後確率であり、評価者が少ないと 0/1 に張り付きやすく、評価者のバイアスが相関している場合は自信満々に間違うこともある — 正しさの保証ではない。`evaluator_effective_n`/`correlated_evaluator_warning` は同じリスク（相関した評価者誤りに対する Kish design effect）を診断するが、*他の*評価者がその相関ブロックの偏りを暴露した場合にしか検出できない — 相関ブロックがEMのconsensusをそのまま乗っ取ってしまった場合は警告は出ない。自己整合性の診断であり、独立した正しさのチェックではない。`latent_truth_converged` は、EMループが収束epsilonに達する前にiteration上限を使い切った場合に false になる（`latent_truth_iterations` が上限に達し、`latent_truth_convergence_delta` は収束epsilonを上回ったまま）— その事後確率は依然として有効だが確信度は低い。バッチ全体でEMは1回だけ実行されるため、同じバッチ内の全サンプルで同じ値になる。 |
 
-`MinRequirements` はどのモードでも閾値判定の**後に**適用されます。`--decision-score latent-truth`
-では、さらにその後にデフォルトで無効な3つの opt-in safety demotion が適用されます:
-`--demote-on-correlated-warning`（`correlated_evaluator_warning` が発火した場合に demote）、
-`--min-evaluator-effective-n <f64>`（`evaluator_effective_n` がこの絶対値を下回った場合に
-demote — 上記の相対的な70%閾値の警告とは独立）、`--demote-on-non-convergence`
-（`latent_truth_converged` が false の場合に demote）。いずれも `Keep` → `Review` へのみ
-demote します — これらは不確実性のシグナルであって間違いの確信ではないため、`Drop` まで
-落とすことはなく、`stability_score` 自体にも触れません。demote が発火した場合、
-`latent_truth_demotion_reason` がどの条件かを示します（`correlated_evaluator_warning`、
-`evaluator_effective_n_below_minimum`、`latent_truth_not_converged` のいずれか。複数条件が
-同時に発火した場合はこの優先順位）。`score` と `stable-wrong-risk` で利用可能。
-`calibrate`/`policy`/`compare --policy-after` は `decision` ではなく生のスコアを直接比較する
-ため no-op です。
+`MinRequirements` はどのモードでも閾値判定の**後に**適用されます。`--decision-score latent-truth` では、さらにその後にデフォルトで無効な3つの opt-in safety demotion が適用されます: `--demote-on-correlated-warning`（`correlated_evaluator_warning` が発火した場合に demote）、`--min-evaluator-effective-n <f64>`（`evaluator_effective_n` がこの絶対値を下回った場合に demote — 上記の相対的な70%閾値の警告とは独立）、`--demote-on-non-convergence`（`latent_truth_converged` が false の場合に demote）。いずれも `Keep` → `Review` へのみ demote します — これらは不確実性のシグナルであって間違いの確信ではないため、`Drop` まで落とすことはなく、`stability_score` 自体にも触れません。demote が発火した場合、`latent_truth_demotion_reason` がどの条件かを示します（`correlated_evaluator_warning`、`evaluator_effective_n_below_minimum`、`latent_truth_not_converged` のいずれか。複数条件が同時に発火した場合はこの優先順位）。`score` と `stable-wrong-risk` で利用可能。`calibrate`/`policy`/`compare --policy-after` は `decision` ではなく生のスコアを直接比較するため no-op です。
 
 | 条件 | 判定 |
 |------|------|
@@ -358,22 +327,11 @@ demote します — これらは不確実性のシグナルであって間違�
 | スコア <= 0.40 | `drop`（除外） |
 | それ以外 | `review`（要確認） |
 
-これは *selective classification* / *reject option* / risk-coverage のトレードオフに
-対応します: すべてのサンプルを無理やりどちらかに分類するのではなく、不確かなものを
-review に回すことで、実際に採用する範囲のリスクを制御します。`keep` = accept、
-`review` = abstain/defer、`drop` = 学習用途としての reject。`calibrate`/`policy` は
-これを実務化したものです（[calibrate コマンド](#calibrate-コマンド) 参照）が、閾値は
-1つの gold-labeled サンプルに対して経験的に選ばれるものであり、conformal のような
-厳密な保証ではありません。より誠実な（それでも経験的な）精度推定には `--heldout` を
-使ってください。詳細は
-[docs/metrics_ja.md](docs/metrics_ja.md#calibrate-と-policy-は-selective-classification-である)
-を参照。
+これは *selective classification* / *reject option* / risk-coverage のトレードオフに対応します: すべてのサンプルを無理やりどちらかに分類するのではなく、不確かなものを review に回すことで、実際に採用する範囲のリスクを制御します。`keep` = accept、`review` = abstain/defer、`drop` = 学習用途としての reject。`calibrate`/`policy` はこれを実務化したものです（[calibrate コマンド](#calibrate-コマンド) 参照）が、閾値は1つの gold-labeled サンプルに対して経験的に選ばれるものであり、conformal のような厳密な保証ではありません。より誠実な（それでも経験的な）精度推定には `--heldout` を使ってください。詳細は [docs/metrics_ja.md](docs/metrics_ja.md#calibrate-と-policy-は-selective-classification-である)を参照。
 
-`--keep-threshold` と `--drop-threshold` で閾値を変更できます。`--confidence-level` で
-Wilson LCB の信頼水準を調整できます（デフォルト 0.95）。
+`--keep-threshold` と `--drop-threshold` で閾値を変更できます。`--confidence-level` で Wilson LCB の信頼水準を調整できます（デフォルト 0.95）。
 
-`--use-adjusted-score` と `--use-lcb-score` は `--decision-score adjusted` / `--decision-score lcb` の
-後方互換 alias です。`--decision-score` が指定された場合はそちらが優先されます。
+`--use-adjusted-score` と `--use-lcb-score` は `--decision-score adjusted` / `--decision-score lcb` の後方互換 alias です。`--decision-score` が指定された場合はそちらが優先されます。
 
 ## explain コマンド
 
@@ -409,10 +367,7 @@ components:
 
 `--json` フラグで `StabilityReport` の JSON をそのまま出力できます。
 
-> **注意**: この例はデフォルトの raw スコア判定モードです（`stability_score = 0.97 → keep`）。
-> `--use-adjusted-score` を使うと、n=3 での confidence ≈ 0.50 により `adjusted_score = 0.74` となり、
-> `--keep-threshold` を下げない限り判定は **review** になります。
-> `--use-lcb-score` では `label_agreement_lcb ≈ 0.44` となり、こちらも **review** になります。
+> **注意**: この例はデフォルトの raw スコア判定モードです（`stability_score = 0.97 → keep`）。`--use-adjusted-score` を使うと、n=3 での confidence ≈ 0.50 により `adjusted_score = 0.74` となり、`--keep-threshold` を下げない限り判定は **review** になります。`--use-lcb-score` では `label_agreement_lcb ≈ 0.44` となり、こちらも **review** になります。
 
 ## compare コマンド
 
@@ -483,10 +438,7 @@ top instability drivers (review + drop samples):
   budget sensitivity        17%
 ```
 
-`lcb_keep_demotions` は `stability_score >= keep_threshold`（raw では keep）かつ
-`label_agreement_lcb < keep_threshold`（LCB では keep 未満）なサンプル数です。
-`--decision-score lcb` に切り替えたときに keep から降格されるサンプルの数を示します。
-raw スコアで既に review/drop なサンプルは除外されます。
+`lcb_keep_demotions` は `stability_score >= keep_threshold`（raw では keep）かつ `label_agreement_lcb < keep_threshold`（LCB では keep 未満）なサンプル数です。`--decision-score lcb` に切り替えたときに keep から降格されるサンプルの数を示します。raw スコアで既に review/drop なサンプルは除外されます。
 
 `--json` フラグで CI/jq から使いやすい JSON を出力できます。
 
@@ -521,8 +473,7 @@ quietset reliability input.jsonl
 | `fleiss_kappa` | 偶然補正済みの評価者間一致係数（名義ラベル、サンプルごとに評価者数が異なっても対応）。0 = 偶然水準、1 = 完全一致、負 = 偶然以下。 |
 | `krippendorff_alpha` | 一致行列方式の信頼性係数。名義ラベルに対応。kappa と同じスケール。 |
 
-サンプルあたり2件以上の評価が2サンプル以上ない場合は出力されません（定義不能）。
-`jq 'select(.fleiss_kappa)'` でサマリ行だけ取り出せます。
+サンプルあたり2件以上の評価が2サンプル以上ない場合は出力されません（定義不能）。`jq 'select(.fleiss_kappa)'` でサマリ行だけ取り出せます。
 
 `gold_label` がある場合、各評価者の行に `confusion` 混同行列も含まれます（`predicted → gold → count`）。
 
@@ -601,36 +552,11 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 }
 ```
 
-`keep_threshold` を 0.99 から 0.50 まで 0.01 刻みで探索し、精度目標を満たす最も緩い閾値を返します。
-`gold_label` がない場合や目標を達成できない場合はエラーになります（`--target-precision` を下げてください）。
+`keep_threshold` を 0.99 から 0.50 まで 0.01 刻みで探索し、精度目標を満たす最も緩い閾値を返します。`gold_label` がない場合や目標を達成できない場合はエラーになります（`--target-precision` を下げてください）。
 
-`precision_ci_low`/`precision_ci_high` は `achieved_precision` に対する Wilson score interval で、
-`--confidence-level`（`lcb` decision score と同じノブ）を使う。gold ラベルが少ないと自動的に広がる
-ので、`n_keep` が小さいときは `achieved_precision` 単体を正確な値として扱わないこと。この区間は
-選ばれた閾値における標本誤差のみをカバーしており、その閾値自体が同じ gold ラベルに対して目標を
-満たすように選ばれた（cherry-pick された）という事実は反映していない — 楽観的な値になる。下限の
-目安として扱い、より保守的に確認したい場合は held-out の gold セットを使うこと。`note` はこの注意を
-機械可読にしたもの: `--heldout` を使っていない場合は常に上記のように付与され、`--heldout` を
-使っていても選ばれた閾値での in-sample precision が held-out precision より 0.05 以上高い場合
-（過学習の疑い）に付与される。gap が小さく通常の標本誤差の範囲内なら `null` になる。
+`precision_ci_low`/`precision_ci_high` は `achieved_precision` に対する Wilson score interval で、`--confidence-level`（`lcb` decision score と同じノブ）を使う。gold ラベルが少ないと自動的に広がるので、`n_keep` が小さいときは `achieved_precision` 単体を正確な値として扱わないこと。この区間は選ばれた閾値における標本誤差のみをカバーしており、その閾値自体が同じ gold ラベルに対して目標を満たすように選ばれた（cherry-pick された）という事実は反映していない — 楽観的な値になる。下限の目安として扱い、より保守的に確認したい場合は held-out の gold セットを使うこと。`note` はこの注意を機械可読にしたもの: `--heldout` を使っていない場合は常に上記のように付与され、`--heldout` を使っていても選ばれた閾値での in-sample precision が held-out precision より 0.05 以上高い場合（過学習の疑い）に付与される。gap が小さく通常の標本誤差の範囲内なら `null` になる。
 
-その「より保守的な確認」を実際に行うのが `--heldout <path>` です。`keep_threshold` の探索は
-引き続きメインの入力に対して行われますが、`achieved_precision`/`precision_ci_low`/
-`precision_ci_high`/`coverage`/`n_keep`/`n_total` はその閾値のまま held-out ファイル自身の
-`gold_label` で測定し直されます。`raw`/`adjusted`/`lcb`/`latent-truth` ではこれで循環参照が
-完全に解消されます — 閾値選択の循環は無くなり、latent-truth の EM はそもそも gold_label を
-一切使わないため、held-out の gold に対する評価は同じサンプルであっても真に独立した検証に
-なります。`gold-weighted` だけは一段階循環が残ります — 評価者ごとの信頼度重みが held-out
-ファイル自身の `gold_label` から fit され、その同じラベルに対して採点されるため、in-sample の
-数値よりは良い指標ですが完全に独立ではないものとして扱ってください。stdin（`-`）には
-非対応（メイン入力が既に stdin を使うため）。held-out ファイルに `gold_label` が無いとエラーに
-なります。メイン入力側で選ばれた閾値が過学習していれば、報告される precision は
-`--target-precision` を下回ることがありますが、それは正しい・正直なシグナルであり、バグでは
-ありません。出力の `validated_on_heldout` は `--heldout` が使われたかどうかを示すので、保存した
-結果を後で見ても何を測定したものか分かります。`train_precision` は同じ閾値での in-sample
-precision を `achieved_precision`（`--heldout` 使用時は held-out precision になる）と並べて
-公開します — `--heldout` を使っていない場合は `achieved_precision` と同じ値になってしまうため
-`null` になります:
+その「より保守的な確認」を実際に行うのが `--heldout <path>` です。`keep_threshold` の探索は引き続きメインの入力に対して行われますが、`achieved_precision`/`precision_ci_low`/`precision_ci_high`/`coverage`/`n_keep`/`n_total` はその閾値のまま held-out ファイル自身の `gold_label` で測定し直されます。`raw`/`adjusted`/`lcb`/`latent-truth` ではこれで循環参照が完全に解消されます — 閾値選択の循環は無くなり、latent-truth の EM はそもそも gold_label を一切使わないため、held-out の gold に対する評価は同じサンプルであっても真に独立した検証になります。`gold-weighted` だけは一段階循環が残ります — 評価者ごとの信頼度重みが held-out ファイル自身の `gold_label` から fit され、その同じラベルに対して採点されるため、in-sample の数値よりは良い指標ですが完全に独立ではないものとして扱ってください。stdin（`-`）には非対応（メイン入力が既に stdin を使うため）。held-out ファイルに `gold_label` が無いとエラーになります。メイン入力側で選ばれた閾値が過学習していれば、報告される precision は `--target-precision` を下回ることがありますが、それは正しい・正直なシグナルであり、バグではありません。出力の `validated_on_heldout` は `--heldout` が使われたかどうかを示すので、保存した結果を後で見ても何を測定したものか分かります。`train_precision` は同じ閾値での in-sample precision を `achieved_precision`（`--heldout` 使用時は held-out precision になる）と並べて公開します — `--heldout` を使っていない場合は `achieved_precision` と同じ値になってしまうため `null` になります:
 
 ```bash
 quietset calibrate input.jsonl --target-precision 0.95 --heldout heldout_gold.jsonl
@@ -662,12 +588,7 @@ decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low
 lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
 ```
 
-`--fail-below-target` を使うと `calibrate` を CI gate にできます: 結果を出力した上で、
-`achieved_precision` が `--target-precision` を下回っていれば非ゼロで終了します。`--heldout`
-なしでは実質的に no-op です（grid search が既に主入力での `achieved_precision >=
---target-precision` を保証するか、そうでなければエラーで失敗するため）。`--heldout` を使う場合、
-`achieved_precision` は held-out での測定値であり、目標を下回ることが正当にあり得ます —
-このフラグはその正直なシグナルを CI パイプラインが判定できる形にします:
+`--fail-below-target` を使うと `calibrate` を CI gate にできます: 結果を出力した上で、`achieved_precision` が `--target-precision` を下回っていれば非ゼロで終了します。`--heldout` なしでは実質的に no-op です（grid search が既に主入力での `achieved_precision >= --target-precision` を保証するか、そうでなければエラーで失敗するため）。`--heldout` を使う場合、`achieved_precision` は held-out での測定値であり、目標を下回ることが正当にあり得ます — このフラグはその正直なシグナルを CI パイプラインが判定できる形にします:
 
 ```bash
 quietset calibrate train.jsonl --heldout heldout.jsonl --target-precision 0.98 --fail-below-target
@@ -743,9 +664,7 @@ quietset stable-wrong-risk input.jsonl --keep-threshold 0.90
 
 `gold_label` が必須です。`stability_score` 降順にソートされ、最も自信を持って keep されている誤りサンプルが先頭に来ます。`--top N` でサンプル数を制限できます。
 
-`--breakdown` を使うと、`Keep` 判定サンプルにおける `stable_wrong_rate` を
-`evaluator_id`/`model_id`/`budget` ごとに分解して報告できます — 特定の評価者・モデル・budget が
-「安定して間違っているのに keep されているサンプル」に不釣り合いに多く現れていないかを見つけられます:
+`--breakdown` を使うと、`Keep` 判定サンプルにおける `stable_wrong_rate` を `evaluator_id`/`model_id`/`budget` ごとに分解して報告できます — 特定の評価者・モデル・budget が「安定して間違っているのに keep されているサンプル」に不釣り合いに多く現れていないかを見つけられます:
 
 ```bash
 quietset stable-wrong-risk input.jsonl --breakdown
@@ -766,13 +685,7 @@ quietset stable-wrong-risk input.jsonl --breakdown
 }
 ```
 
-各内訳はトップレベルの rate と同様サンプルレベルです: `by_evaluator[i].n_keep` はその
-`evaluator_id` に触れている `Keep` サンプル数であり、観測数ではありません。1つのサンプルが
-複数の evaluator/model/budget に同時に触れることがあるため、内訳の各行を合計してもトップレベルの
-`n_keep` にはなりません — これは意図的なもので、パーティション（分割）ではありません。
-「wrong-but-confident なサンプルにどの evaluator/model/budget が現れるか」を答えるものであり、
-「誰の責任か」を答えるものではありません。デフォルトでは無効です — 入力をクローンして追加の
-グルーピング処理を行うためです。
+各内訳はトップレベルの rate と同様サンプルレベルです: `by_evaluator[i].n_keep` はその `evaluator_id` に触れている `Keep` サンプル数であり、観測数ではありません。1つのサンプルが複数の evaluator/model/budget に同時に触れることがあるため、内訳の各行を合計してもトップレベルの `n_keep` にはなりません — これは意図的なもので、パーティション（分割）ではありません。「wrong-but-confident なサンプルにどの evaluator/model/budget が現れるか」を答えるものであり、「誰の責任か」を答えるものではありません。デフォルトでは無効です — 入力をクローンして追加のグルーピング処理を行うためです。
 
 ## compare --policy-after
 
@@ -792,14 +705,11 @@ policy comparison: current → lcb (keep_threshold=0.85):
   demoted by policy: 850  promoted: 0
 ```
 
-> **注意:** `--policy-after lcb` は `label_agreement_lcb` を LCB ポリシースコアの近似値として使用します。
-> 他のコンポーネントは再計算されないため、結果は近似値です。正確な予測ではなく方向性の参考
-> （「ポリシーによって何件が降格されるか」）としてお使いください。
+> **注意:** `--policy-after lcb` は `label_agreement_lcb` を LCB ポリシースコアの近似値として使用します。他のコンポーネントは再計算されないため、結果は近似値です。正確な予測ではなく方向性の参考（「ポリシーによって何件が降格されるか」）としてお使いください。
 
 ## policy コマンド
 
-`keep_threshold` を 0.99 から 0.50 まで掃引し、各段階での precision/coverage/stable-wrong-rate の
-トレードオフを表示します。`score` を実行する前に閾値を選ぶのに使えます:
+`keep_threshold` を 0.99 から 0.50 まで掃引し、各段階での precision/coverage/stable-wrong-rate のトレードオフを表示します。`score` を実行する前に閾値を選ぶのに使えます:
 
 ```bash
 quietset policy input.jsonl
@@ -814,13 +724,7 @@ threshold  n_keep  coverage
 0.97            1     0.500
 ```
 
-観測に `gold_label` があれば、表に `precision` と `stable_wrong_rate` の列も追加されます。
-`--target-precision`/`--target-coverage` は目標を満たす最も緩い閾値を `←` で示します。
-`--output-format json` は整形テーブルの代わりに閾値ごとに1行のJSONLを出力します(`--json` も
-引き続きエイリアスとして使用可。両方指定すると警告が出て `--output-format` が優先される)。
-`--output-format csv` は閾値ごとに1行、固定列 `threshold,n_keep,coverage,precision,
-stable_wrong_rate,best` で出力し、`gold_label` が無い場合は `precision`/`stable_wrong_rate`
-が空、`best` は `--target-precision`/`--target-coverage` に一致する行だけ `true`:
+観測に `gold_label` があれば、表に `precision` と `stable_wrong_rate` の列も追加されます。`--target-precision`/`--target-coverage` は目標を満たす最も緩い閾値を `←` で示します。`--output-format json` は整形テーブルの代わりに閾値ごとに1行のJSONLを出力します(`--json` も引き続きエイリアスとして使用可。両方指定すると警告が出て `--output-format` が優先される)。`--output-format csv` は閾値ごとに1行、固定列 `threshold,n_keep,coverage,precision,stable_wrong_rate,best` で出力し、`gold_label` が無い場合は `precision`/`stable_wrong_rate` が空、`best` は `--target-precision`/`--target-coverage` に一致する行だけ `true`:
 
 ```bash
 quietset policy input.jsonl --target-precision 0.95 --output-format csv
@@ -833,8 +737,7 @@ threshold,n_keep,coverage,precision,stable_wrong_rate,best
 
 ## active-review コマンド
 
-scored JSONL を、低い `label_agreement_lcb`・高い `label_entropy`・高い `score_mad`・高い budget/seed
-感度を重み付け合成した「再評価の緊急度」でランク付けします:
+scored JSONL を、低い `label_agreement_lcb`・高い `label_entropy`・高い `score_mad`・高い budget/seed 感度を重み付け合成した「再評価の緊急度」でランク付けします:
 
 ```bash
 quietset score input.jsonl | quietset active-review -
@@ -845,61 +748,27 @@ quietset active-review scored.jsonl --unstable-only --top 20
 {"budget_sensitivity":0.625,"cost":1.0,"expected_coverage_gain":1.0,"expected_risk_reduction":0.0,"label_agreement_flip_ratio":0.818,"label_agreement_lcb":0.301,"label_entropy":0.811,"primary_reason":"high_entropy","sample_id":"b","seed_sensitivity":0.075,"suggested_action":"add_evaluator","urgency_score":0.502,"utility":0.818}
 ```
 
-`--unstable-only` は問題のない keep サンプルをスキップします。信号ごとの `--weight-*` フラグ
-（`--weight-lcb`、`--weight-entropy`、`--weight-score-mad`、`--weight-budget-sensitivity`、
-`--weight-seed-sensitivity`）で、レビュー予算に応じて重視する信号を調整できます。
-`suggested_action` は `request_gold_label`、`add_evaluator`、`add_model`、`increase_budget`、
-`add_seed` のいずれかです（以前の `add_observations`/`diversify_evaluators`/
-`reduce_score_variance`/`add_budget`/`add_seeds` からの改名 — 破壊的変更、CHANGELOG参照）。
+`--unstable-only` は問題のない keep サンプルをスキップします。信号ごとの `--weight-*` フラグ（`--weight-lcb`、`--weight-entropy`、`--weight-score-mad`、`--weight-budget-sensitivity`、`--weight-seed-sensitivity`）で、レビュー予算に応じて重視する信号を調整できます。`suggested_action` は `request_gold_label`、`add_evaluator`、`add_model`、`increase_budget`、`add_seed` のいずれかです（以前の `add_observations`/`diversify_evaluators`/`reduce_score_variance`/`add_budget`/`add_seeds` からの改名 — 破壊的変更、CHANGELOG参照）。
 
 5つの新しいフィールドが、緊急度ヒューリスティックを期待値ベースのランキングに拡張します:
 
-- `label_agreement_flip_ratio` — `[0.0, 1.0]` の閾値距離比: `--keep-threshold`/
-  `--drop-threshold` ちょうどで `1.0`、そこから離れるほど `label_agreement` 自身の Wilson CI
-  誤差幅に対して相対的に `0.0` へ縮む。**確率ではない** — モデル化されているのは
-  `label_agreement` の標本誤差だけであり、`stability_score` の他の構成要素（スコア分散、
-  budget/seed感度、model/evaluator agreement）にはこのコードベースに不確実性モデルが無いため、
-  それらが実際に `stability_score` を左右している場合はこの比率は粗い近似にすぎない。ラベルが
-  無いサンプルでは `None`。
-- `expected_coverage_gain` — サンプルの `decision`（入力からそのまま読まれ、再計算されない）が
-  `keep` でない場合は `1 / n_total`、そうでなければ `0.0`: このサンプルの判定が `keep` に
-  反転した場合の正確な coverage 変化量。
-- `expected_risk_reduction` — サンプルが `keep` かつ `label_agreement_lcb` が
-  `--keep-threshold` を下回る場合（`stable-wrong-risk` の `lcb_keep_demotions` と同じ
-  「risk のある keep」条件）は `1 / n_keep`、そうでなければ `0.0`。
-- `cost` — `suggested_action` のコスト。`--cost-seed`/`--cost-budget`/`--cost-evaluator`/
-  `--cost-gold-label`（すべてデフォルト `1.0`。`--cost-evaluator` は `add_model` のコストも
-  兼ねる）から。
-- `utility` — `label_agreement_flip_ratio * (expected_coverage_gain + expected_risk_reduction)
-  / cost`。文字通りの期待値ではなくランキングスコア — これで順位付けすること自体は妥当だが
-  （閾値に近く・見返りが大きく・安く直せるものほど上位に来る）、絶対値を較正された期待値として
-  読んではいけない。
+- `label_agreement_flip_ratio` — `[0.0, 1.0]` の閾値距離比: `--keep-threshold`/`--drop-threshold` ちょうどで `1.0`、そこから離れるほど `label_agreement` 自身の Wilson CI 誤差幅に対して相対的に `0.0` へ縮む。**確率ではない** — モデル化されているのは `label_agreement` の標本誤差だけであり、`stability_score` の他の構成要素（スコア分散、budget/seed感度、model/evaluator agreement）にはこのコードベースに不確実性モデルが無いため、それらが実際に `stability_score` を左右している場合はこの比率は粗い近似にすぎない。ラベルが無いサンプルでは `None`。
+- `expected_coverage_gain` — サンプルの `decision`（入力からそのまま読まれ、再計算されない）が `keep` でない場合は `1 / n_total`、そうでなければ `0.0`: このサンプルの判定が `keep` に反転した場合の正確な coverage 変化量。
+- `expected_risk_reduction` — サンプルが `keep` かつ `label_agreement_lcb` が `--keep-threshold` を下回る場合（`stable-wrong-risk` の `lcb_keep_demotions` と同じ「risk のある keep」条件）は `1 / n_keep`、そうでなければ `0.0`。
+- `cost` — `suggested_action` のコスト。`--cost-seed`/`--cost-budget`/`--cost-evaluator`/`--cost-gold-label`（すべてデフォルト `1.0`。`--cost-evaluator` は `add_model` のコストも兼ねる）から。
+- `utility` — `label_agreement_flip_ratio * (expected_coverage_gain + expected_risk_reduction) / cost`。文字通りの期待値ではなくランキングスコア — これで順位付けすること自体は妥当だが（閾値に近く・見返りが大きく・安く直せるものほど上位に来る）、絶対値を較正された期待値として読んではいけない。
 
-`--keep-threshold`/`--drop-threshold`（デフォルトは `score` と同じ `0.85`/`0.40`）は
-`label_agreement_flip_ratio` と at-risk-keep のゲート判定にのみ使われ、`decision` を再計算する
-ものではない。`--rank-by urgency`（デフォルト）は `urgency_score` で、`--rank-by utility` は
-`utility` でソートし、単に不安定に見えるサンプルではなく追加レビューの効果が最も大きいサンプルを
-浮かび上がらせる。
+`--keep-threshold`/`--drop-threshold`（デフォルトは `score` と同じ `0.85`/`0.40`）は `label_agreement_flip_ratio` と at-risk-keep のゲート判定にのみ使われ、`decision` を再計算するものではない。`--rank-by urgency`（デフォルト）は `urgency_score` で、`--rank-by utility` は `utility` でソートし、単に不安定に見えるサンプルではなく追加レビューの効果が最も大きいサンプルを浮かび上がらせる。
 
-`--plan <path>` を使うと、予算制約付きの評価計画を JSONL として書き出せる — `--rank-by` に
-関わらず常に `utility` 降順で、通常の標準出力に加えて出力される。`--budget <f64>` は含める
-エントリの総 `cost` の上限を指定する: utility 順に貪欲に採用し、収まらないものはスキップして
-（そこで打ち切らずに）走査を続けるので、リストの後方にあるより安価で utility の低いエントリも
-含められる可能性がある。`--budget` を省略すると、`--plan` は全エントリを（utility 順のまま）
-書き出す:
+`--plan <path>` を使うと、予算制約付きの評価計画を JSONL として書き出せる — `--rank-by` に関わらず常に `utility` 降順で、通常の標準出力に加えて出力される。`--budget <f64>` は含めるエントリの総 `cost` の上限を指定する: utility 順に貪欲に採用し、収まらないものはスキップして（そこで打ち切らずに）走査を続けるので、リストの後方にあるより安価で utility の低いエントリも含められる可能性がある。`--budget` を省略すると、`--plan` は全エントリを（utility 順のまま）書き出す:
 
 ```bash
 quietset active-review scored.jsonl --plan next_eval_plan.jsonl --budget 20.0
 ```
 
-これは knapsack 型の予算配分問題に対する標準的な value-density 貪欲近似であり、大域最適は
-保証されないが、「次のレビュー予算を何に使うべきか」の順位付けとしては妥当なものになる。
+これは knapsack 型の予算配分問題に対する標準的な value-density 貪欲近似であり、大域最適は保証されないが、「次のレビュー予算を何に使うべきか」の順位付けとしては妥当なものになる。
 
-`--observations <path>`（`score` を実行したのと同じ生の observation JSONL）を渡すと、
-`suggested_action` に対する具体的な target 値も計算される — `StabilityReport` には派生統計
-（sensitivity/robustness スコア）しかなく、target をサイジングするための生の
-budget/seed/evaluator/model 値が失われているため。`audit --observations` が agreement 統計
-のために埋めているのと同じギャップです:
+`--observations <path>`（`score` を実行したのと同じ生の observation JSONL）を渡すと、`suggested_action` に対する具体的な target 値も計算される — `StabilityReport` には派生統計（sensitivity/robustness スコア）しかなく、target をサイジングするための生の budget/seed/evaluator/model 値が失われているため。`audit --observations` が agreement 統計のために埋めているのと同じギャップです:
 
 ```bash
 quietset active-review scored.jsonl --observations input.jsonl
@@ -917,8 +786,7 @@ quietset active-review scored.jsonl --observations input.jsonl
 - `add_model` → `target_model_slot` = そのサンプルの distinct `model_id` 数 + 1
 - `request_gold_label` → target field なし（サイジングする対象がないため）
 
-`--observations` を渡さない場合はすべて省略され、observation ファイルに該当する生の値が
-存在しない場合もサンプルごとに省略される — 捏造した既定値になることはない。
+`--observations` を渡さない場合はすべて省略され、observation ファイルに該当する生の値が存在しない場合もサンプルごとに省略される — 捏造した既定値になることはない。
 
 ## Rust API
 
@@ -949,10 +817,7 @@ if let Some(report) = scorer.flush() { println!("{:?}", report.decision); }
 
 ## Python バインディング
 
-`crates/quietset-py` に [pyo3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/) を使った Python バインディングがあります。
-状態: **alpha / experimental** — コアのスコアリング API はラップ済みだが、インターフェースは今後変わる可能性がある。
-Cargo workspace および CI からは除外されており(`cargo build/test --workspace` では一切触れない)、
-`crates/quietset-py` 内で個別にビルド・テストする必要がある。
+`crates/quietset-py` に [pyo3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/) を使った Python バインディングがあります。状態: **alpha / experimental** — コアのスコアリング API はラップ済みだが、インターフェースは今後変わる可能性がある。Cargo workspace および CI からは除外されており（`cargo build/test --workspace` では一切触れない）、`crates/quietset-py` 内で個別にビルド・テストする必要がある。
 
 ```bash
 cd crates/quietset-py
@@ -966,17 +831,11 @@ result = quietset.score_jsonl('{"sample_id":"a","label":"win","score":0.9}\n' * 
 print(result)
 ```
 
-バインディングは現在 `score_jsonl` という単一の関数のみを公開しており、JSONL 文字列をデフォルト設定でスコアリングして
-JSONL 文字列を返す。CLI が全コマンド・全オプションを備えた安定インターフェースであり、Python バインディングは
-サブプロセス起動が難しい既存の Python パイプラインに簡易スコアリングを組み込む用途向け。
+バインディングは現在 `score_jsonl` という単一の関数のみを公開しており、JSONL 文字列をデフォルト設定でスコアリングして JSONL 文字列を返す。CLI が全コマンド・全オプションを備えた安定インターフェースであり、Python バインディングはサブプロセス起動が難しい既存の Python パイプラインに簡易スコアリングを組み込む用途向け。
 
 ## これらの数値の根拠
 
-quietset は単一の論文の実装ではありません。サンプルごとの基礎指標の多くは既存の、名前の付いた
-統計量です。一方で `stability_score` とそれを組み合わせた keep/review/drop の判定ポリシーは
-quietset 独自の設計であり、理論的な保証ではありません。この表はコンパクトな分類です —
-各指標の完全な数式・前提・failure mode は [docs/metrics_ja.md](docs/metrics_ja.md) を
-参照してください。
+quietset は単一の論文の実装ではありません。サンプルごとの基礎指標の多くは既存の、名前の付いた統計量です。一方で `stability_score` とそれを組み合わせた keep/review/drop の判定ポリシーは quietset 独自の設計であり、理論的な保証ではありません。この表はコンパクトな分類です — 各指標の完全な数式・前提・failure mode は [docs/metrics_ja.md](docs/metrics_ja.md) を参照してください。
 
 **既存の統計量**（忠実な実装。完全な数式はリンク先の各セクションを参照）:
 
@@ -1001,8 +860,7 @@ quietset 独自の設計であり、理論的な保証ではありません。�
 | `stable_wrong_rate_among_keep` | 直接計測される経験的な率 — [stable-wrong-risk](#stable-wrong-risk-コマンド) 参照 |
 | `stable-wrong-risk --breakdown` | 同じ率を evaluator/model/budget 別に集計したもの — [stable-wrong-risk](#stable-wrong-risk-コマンド) 参照 |
 
-**quietset 独自のヒューリスティック**（上記を組み合わせて運用上の判定にしたもの。単体では
-引用可能な統計手法ではない）:
+**quietset 独自のヒューリスティック**（上記を組み合わせて運用上の判定にしたもの。単体では引用可能な統計手法ではない）:
 
 | フィールド | 根拠 |
 |-----------|------|
@@ -1011,12 +869,7 @@ quietset 独自の設計であり、理論的な保証ではありません。�
 | `score_sign_agreement` | 符号付き・ゼロ中心のスコア向けの実務寄り補完指標 — [安定性スコア](#安定性スコアstability_score) 参照 |
 | `keep`/`drop` 閾値（0.85 / 0.40） | 運用上のデフォルト値であり、数式から導出された定数ではない — [判定](#判定decision) 参照 |
 
-`calibrate`/`policy` は selective prediction / risk-coverage（reject option）の考え方に近いです
-（不確かなサンプルを reject して review に回すことで、採用範囲のリスクを下げる）。ただし
-**conformal prediction のような厳密な保証ではありません**。閾値は1つの gold-labeled サンプルに
-対して経験的に選ばれるため、`achieved_precision` は「証明された値」ではなく「計測された値」として
-扱ってください。詳細は [calibrate](#calibrate-コマンド) の in-sample-optimism に関する `note` と
-`--heldout` の説明を参照。
+`calibrate`/`policy` は selective prediction / risk-coverage（reject option）の考え方に近いです（不確かなサンプルを reject して review に回すことで、採用範囲のリスクを下げる）。ただし **conformal prediction のような厳密な保証ではありません**。閾値は1つの gold-labeled サンプルに対して経験的に選ばれるため、`achieved_precision` は「証明された値」ではなく「計測された値」として扱ってください。詳細は [calibrate](#calibrate-コマンド) の in-sample-optimism に関する `note` と `--heldout` の説明を参照。
 
 ## 類似ツールとの比較
 
