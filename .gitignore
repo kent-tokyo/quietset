@@ -4,3 +4,4 @@ tasks/*
 .claude/
 target/
 .env
+tasks/
