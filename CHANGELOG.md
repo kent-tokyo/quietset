@@ -17,6 +17,13 @@
   without `--observations`, and omitted per-sample whenever the relevant raw value is missing
   — never a fabricated default. New library function `quietset::action_target_fields`.
 
+### Fixed
+- Japanese docs (`README_ja.md`, `docs/metrics_ja.md`, `docs/research-map_ja.md`) no longer
+  render spurious mid-phrase spaces on GitHub. The cause: markdown collapses a soft line break
+  to a literal space, which is invisible in English (wraps at existing word boundaries) but
+  broke Japanese, which has no inter-word spaces — every wrapped source line was a rendering
+  defect. Fixed by joining each affected paragraph back onto a single source line.
+
 ## 0.12.0 — 2026-07-05
 
 ### Added
