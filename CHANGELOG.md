@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.0 — 2026-07-05
+
 ### Added
 - README.md/README_ja.md: "Game AI / search training data" use case now shows the full
   recommended pipeline (`score --profile game-ai` → `stable-wrong-risk` → `active-review
