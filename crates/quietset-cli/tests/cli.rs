@@ -39,6 +39,23 @@ fn score_jsonl_succeeds_on_valid_fixture() {
     assert!(stdout(&out).contains("\"sample_id\":\"a\""));
 }
 
+// simple.jsonl: sample "a" is stable (Keep), sample "b" is not -- so the default summary
+// should report kept 1/2, review 1, drop 0, on stderr, leaving stdout as pure JSONL.
+#[test]
+fn score_prints_keep_rate_summary_to_stderr_by_default() {
+    let out = run(&["score", "../../tests/fixtures/simple.jsonl"]);
+    assert!(out.status.success());
+    assert!(stderr(&out).contains("kept 1 / 2"));
+    assert!(stderr(&out).contains("review 1"));
+    assert!(stderr(&out).contains("drop 0"));
+    for line in stdout(&out).lines() {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok(),
+            "summary output must stay on stderr, not leak into stdout JSONL: {line}"
+        );
+    }
+}
+
 #[test]
 fn score_invalid_jsonl_without_skip_invalid_fails() {
     let path = write_temp(
@@ -260,6 +277,34 @@ fn game_ai_single_engine_profile_keeps_what_game_ai_profile_wrongly_demotes() {
     let value_single: serde_json::Value =
         serde_json::from_str(stdout(&under_single_engine).lines().next().unwrap()).unwrap();
     assert_eq!(value_single["decision"], "keep");
+}
+
+// Same single-evaluator shape as the test above, but checking the proactive stderr warning
+// rather than the decision itself: --profile game-ai's min-evaluators-keep floor of 2 can
+// never be met by one evaluator_id, so this must warn and point at the single-engine profile;
+// --profile game-ai-single-engine sets no evaluator floor, so it must stay silent.
+#[test]
+fn score_warns_when_min_evaluators_keep_exceeds_dataset_evaluator_count() {
+    let path = write_temp(
+        "min_evaluators_warning.jsonl",
+        "{\"sample_id\":\"one_engine\",\"budget\":10.0,\"seed\":1,\"evaluator_id\":\"sekirei\",\"score\":0.35}\n\
+         {\"sample_id\":\"one_engine\",\"budget\":20.0,\"seed\":2,\"evaluator_id\":\"sekirei\",\"score\":0.52}\n\
+         {\"sample_id\":\"one_engine\",\"budget\":10.0,\"seed\":2,\"evaluator_id\":\"sekirei\",\"score\":0.41}\n\
+         {\"sample_id\":\"one_engine\",\"budget\":20.0,\"seed\":1,\"evaluator_id\":\"sekirei\",\"score\":0.44}\n",
+    );
+
+    let under_game_ai = run(&["score", path.to_str().unwrap(), "--profile", "game-ai"]);
+    assert!(under_game_ai.status.success());
+    assert!(stderr(&under_game_ai).contains("game-ai-single-engine"));
+
+    let under_single_engine = run(&[
+        "score",
+        path.to_str().unwrap(),
+        "--profile",
+        "game-ai-single-engine",
+    ]);
+    assert!(under_single_engine.status.success());
+    assert!(!stderr(&under_single_engine).contains("game-ai-single-engine"));
 }
 
 fn gold_labeled_fixture() -> std::path::PathBuf {

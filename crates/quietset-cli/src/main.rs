@@ -992,6 +992,31 @@ fn run_score(args: ScoreArgs) -> Result<()> {
         (_, VoteArg::Weighted) => score_all_weighted(observations.clone(), &config),
     };
 
+    let stats = compute_aggregate_stats(&reports, args.keep_threshold);
+    eprintln!(
+        "kept {} / {} ({:.1}%), review {}, drop {}",
+        stats.n_keep,
+        stats.total,
+        100.0 * stats.n_keep as f64 / stats.total as f64,
+        stats.n_review,
+        stats.n_drop
+    );
+
+    if config.min_requirements.evaluators > 0 {
+        use std::collections::HashSet;
+        let distinct_evaluators = observations
+            .iter()
+            .filter_map(|o| o.evaluator_id.as_deref())
+            .collect::<HashSet<_>>()
+            .len();
+        if distinct_evaluators < config.min_requirements.evaluators {
+            eprintln!(
+                "warning: --min-evaluators-keep {} requires that many distinct evaluator_id values for a Keep decision, but this input only has {}. If this is one engine evaluated at multiple search depths (not multiple engines), use --profile game-ai-single-engine instead of --profile game-ai, or pass --min-evaluators-keep 0 explicitly.",
+                config.min_requirements.evaluators, distinct_evaluators
+            );
+        }
+    }
+
     if args.estimate_evaluator_reliability {
         let reliability = compute_evaluator_reliability(&observations, &reports);
         let mut sorted: Vec<_> = reliability.into_iter().collect();

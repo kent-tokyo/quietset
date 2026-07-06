@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+- `score` now prints a `kept X / Y (Z%), review N, drop M` summary to stderr by default —
+  previously the only way to see keep/review/drop counts was a separate `audit`/`summary`
+  call after the fact. Reuses the same `compute_aggregate_stats` aggregation those commands
+  already share; stdout stays pure JSONL/CSV, unaffected
+- `score` now warns on stderr when `--min-evaluators-keep` (explicit or via `--profile
+  game-ai`) exceeds the input's actual distinct `evaluator_id` count, and suggests
+  `--profile game-ai-single-engine` — this is exactly the failure mode that profile was
+  added to fix, but a user who forgets to switch profiles (or passes `--min-evaluators-keep`
+  directly) previously got the same silent Keep→Review demotion with no diagnostic pointing
+  at the cause
+
 ## 0.14.0 — 2026-07-05
 
 ### Added
