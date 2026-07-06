@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.15.0 — 2026-07-06
+
 ### Added
 - `score` now prints a `kept X / Y (Z%), review N, drop M` summary to stderr by default —
   previously the only way to see keep/review/drop counts was a separate `audit`/`summary`
