@@ -12,9 +12,9 @@ use quietset::{
     LatentTruthSafety, MinRequirements, Observation, RankBy, ScoreConfig, ScoreDispersion,
     ScoreWeights, StabilityReport, Thresholds, action_target_fields, compute_calibration,
     compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha,
-    compute_trajectory_audit, group_size_mismatches, parse_csv, parse_jsonl, rank_active_review,
-    score_all, score_all_blocks, score_all_gold_weighted, score_all_latent_truth,
-    score_all_weighted, select_within_budget,
+    compute_spearman_rank_correlation, compute_trajectory_audit, group_size_mismatches, parse_csv,
+    parse_jsonl, rank_active_review, score_all, score_all_blocks, score_all_gold_weighted,
+    score_all_latent_truth, score_all_weighted, select_within_budget,
 };
 
 #[derive(Parser)]
@@ -679,6 +679,15 @@ struct ActiveReviewArgs {
     /// Weight for high-seed-sensitivity signal.
     #[arg(long, default_value_t = 1.0)]
     weight_seed_sensitivity: f64,
+    /// Weight for high-order-sensitivity signal (shuffle_seed_sensitivity).
+    #[arg(long, default_value_t = 1.0)]
+    weight_order_sensitivity: f64,
+    /// Weight for high-teacher-conflict signal (1 - teacher_residual_stability).
+    #[arg(long, default_value_t = 1.0)]
+    weight_teacher_conflict: f64,
+    /// Weight for high-gradient-instability signal (1 - gradient_sign_agreement).
+    #[arg(long, default_value_t = 1.0)]
+    weight_gradient_instability: f64,
     /// Keep threshold used only to compute label_agreement_flip_ratio and the at-risk-keep
     /// gate for expected_risk_reduction. Does not re-derive `decision`, which is read
     /// verbatim from the input (whatever thresholds `score` used originally).
@@ -697,9 +706,12 @@ struct ActiveReviewArgs {
     /// Cost of the add_evaluator and add_model actions.
     #[arg(long, default_value_t = 1.0)]
     cost_evaluator: f64,
-    /// Cost of the request_gold_label action.
+    /// Cost of the request_gold_label and flag_teacher_conflict actions.
     #[arg(long, default_value_t = 1.0)]
     cost_gold_label: f64,
+    /// Cost of the add_shuffle_seed action.
+    #[arg(long, default_value_t = 1.0)]
+    cost_shuffle_seed: f64,
     /// Sort order: urgency (today's heuristic) or utility (expected benefit / cost).
     #[arg(long, value_enum, default_value = "urgency")]
     rank_by: RankByArg,
@@ -1526,6 +1538,12 @@ fn run_compare(args: CompareArgs) -> Result<()> {
             .partial_cmp(&(y.2 - y.1))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let rank_stability = compute_spearman_rank_correlation(
+        &pairs
+            .iter()
+            .map(|(b, a)| (b.stability_score, a.stability_score))
+            .collect::<Vec<_>>(),
+    );
 
     #[allow(clippy::type_complexity)]
     const COMP_FNS: &[(&str, fn(&quietset::StabilityComponents) -> Option<f64>)] = &[
@@ -1582,6 +1600,9 @@ fn run_compare(args: CompareArgs) -> Result<()> {
             "transitions": transitions,
             "top_regressions": top_regressions,
         });
+        if let Some(rho) = rank_stability {
+            out_json["rank_stability"] = serde_json::json!(rho);
+        }
         if !comp_deltas.is_empty() {
             let deltas: serde_json::Map<String, serde_json::Value> = comp_deltas
                 .iter()
@@ -1595,6 +1616,9 @@ fn run_compare(args: CompareArgs) -> Result<()> {
 
     println!("matched samples:  {}", pairs.len());
     println!("mean stability:   {:.4} → {:.4}", mean_before, mean_after);
+    if let Some(rho) = rank_stability {
+        println!("rank stability:   {rho:.4}  (Spearman's rho of stability_score ranks)");
+    }
     println!();
     println!("decision transitions (before → after):");
     println!(
@@ -2863,12 +2887,16 @@ fn run_active_review(args: ActiveReviewArgs) -> Result<()> {
         score_mad: args.weight_score_mad,
         budget_sensitivity: args.weight_budget_sensitivity,
         seed_sensitivity: args.weight_seed_sensitivity,
+        order_sensitivity: args.weight_order_sensitivity,
+        teacher_conflict: args.weight_teacher_conflict,
+        gradient_instability: args.weight_gradient_instability,
     };
     let costs = ActiveReviewCosts {
         seed: args.cost_seed,
         budget: args.cost_budget,
         evaluator: args.cost_evaluator,
         gold_label: args.cost_gold_label,
+        shuffle_seed: args.cost_shuffle_seed,
     };
     let thresholds = Thresholds {
         keep: args.keep_threshold,
@@ -2903,6 +2931,7 @@ fn run_active_review(args: ActiveReviewArgs) -> Result<()> {
                 let targets = action_target_fields(e.suggested_action, sample_obs);
                 e.target_budget = targets.target_budget;
                 e.target_seed = targets.target_seed;
+                e.target_shuffle_seed = targets.target_shuffle_seed;
                 e.target_evaluator_slot = targets.target_evaluator_slot;
                 e.target_model_slot = targets.target_model_slot;
             }
@@ -2966,6 +2995,9 @@ fn active_review_entry_json(e: &quietset::ActiveReviewEntry) -> serde_json::Valu
     }
     if let Some(v) = e.target_seed {
         obj.insert("target_seed".into(), serde_json::json!(v));
+    }
+    if let Some(v) = e.target_shuffle_seed {
+        obj.insert("target_shuffle_seed".into(), serde_json::json!(v));
     }
     if let Some(v) = e.target_evaluator_slot {
         obj.insert("target_evaluator_slot".into(), serde_json::json!(v));

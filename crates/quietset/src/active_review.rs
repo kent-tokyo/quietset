@@ -2,7 +2,7 @@ use crate::decision::Thresholds;
 use crate::observation::Observation;
 use crate::schema::{Decision, StabilityReport};
 
-/// Weights for the five urgency signals. All default to `1.0`, matching each signal
+/// Weights for the eight urgency signals. All default to `1.0`, matching each signal
 /// contributing equally unless a caller opts out (weight `0.0`).
 #[derive(Debug, Clone)]
 pub struct ActiveReviewWeights {
@@ -11,6 +11,12 @@ pub struct ActiveReviewWeights {
     pub score_mad: f64,
     pub budget_sensitivity: f64,
     pub seed_sensitivity: f64,
+    /// Order-dependency: weight for `shuffle_seed_sensitivity`.
+    pub order_sensitivity: f64,
+    /// Weight for `1 - teacher_residual_stability`.
+    pub teacher_conflict: f64,
+    /// Weight for `1 - gradient_sign_agreement`.
+    pub gradient_instability: f64,
 }
 
 impl Default for ActiveReviewWeights {
@@ -21,20 +27,28 @@ impl Default for ActiveReviewWeights {
             score_mad: 1.0,
             budget_sensitivity: 1.0,
             seed_sensitivity: 1.0,
+            order_sensitivity: 1.0,
+            teacher_conflict: 1.0,
+            gradient_instability: 1.0,
         }
     }
 }
 
 /// Per-resource cost used to compute `utility = benefit / cost`. All default to `1.0`
 /// (equal cost), so `utility` reduces to plain expected benefit unless a caller supplies
-/// real relative costs. `evaluator` also backs the `add_model` action — the task only named
-/// four cost dimensions for five actions.
+/// real relative costs. `evaluator` also backs the `add_model` action; `seed` also backs
+/// `add_init_seed` (both are "run one more seed" remedies) and `gold_label` also backs
+/// `flag_teacher_conflict` (both are "route to human review" remedies) — the original task
+/// only named four cost dimensions for five actions, and this extension keeps that pattern
+/// rather than adding a cost field per new action.
 #[derive(Debug, Clone)]
 pub struct ActiveReviewCosts {
     pub seed: f64,
     pub budget: f64,
     pub evaluator: f64,
     pub gold_label: f64,
+    /// Cost of `add_shuffle_seed`.
+    pub shuffle_seed: f64,
 }
 
 impl Default for ActiveReviewCosts {
@@ -44,6 +58,7 @@ impl Default for ActiveReviewCosts {
             budget: 1.0,
             evaluator: 1.0,
             gold_label: 1.0,
+            shuffle_seed: 1.0,
         }
     }
 }
@@ -103,6 +118,7 @@ pub struct ActiveReviewEntry {
     /// `StabilityReport`.
     pub target_budget: Option<f64>,
     pub target_seed: Option<u64>,
+    pub target_shuffle_seed: Option<u64>,
     pub target_evaluator_slot: Option<usize>,
     pub target_model_slot: Option<usize>,
 }
@@ -191,6 +207,30 @@ pub fn rank_active_review(
                 "add_seed",
                 costs.seed,
             ),
+            (
+                "high_order_sensitivity",
+                r.shuffle_seed_sensitivity
+                    .map(|v| v * weights.order_sensitivity)
+                    .unwrap_or(0.0),
+                "add_shuffle_seed",
+                costs.shuffle_seed,
+            ),
+            (
+                "high_teacher_conflict",
+                r.teacher_residual_stability
+                    .map(|v| (1.0 - v) * weights.teacher_conflict)
+                    .unwrap_or(0.0),
+                "flag_teacher_conflict",
+                costs.gold_label,
+            ),
+            (
+                "high_gradient_instability",
+                r.gradient_sign_agreement
+                    .map(|v| (1.0 - v) * weights.gradient_instability)
+                    .unwrap_or(0.0),
+                "add_init_seed",
+                costs.seed,
+            ),
         ];
 
         let total_w: f64 = [
@@ -202,6 +242,15 @@ pub fn rank_active_review(
                 .unwrap_or(0.0),
             r.seed_sensitivity
                 .map(|_| weights.seed_sensitivity)
+                .unwrap_or(0.0),
+            r.shuffle_seed_sensitivity
+                .map(|_| weights.order_sensitivity)
+                .unwrap_or(0.0),
+            r.teacher_residual_stability
+                .map(|_| weights.teacher_conflict)
+                .unwrap_or(0.0),
+            r.gradient_sign_agreement
+                .map(|_| weights.gradient_instability)
                 .unwrap_or(0.0),
         ]
         .iter()
@@ -262,6 +311,7 @@ pub fn rank_active_review(
             utility,
             target_budget: None,
             target_seed: None,
+            target_shuffle_seed: None,
             target_evaluator_slot: None,
             target_model_slot: None,
         });
@@ -328,10 +378,19 @@ pub fn action_target_fields(suggested_action: &str, observations: &[Observation]
                 .map(|max_budget| max_budget * 2.0),
             ..ActionTargets::default()
         },
-        "add_seed" => ActionTargets {
+        // add_init_seed reuses target_seed: both are "run one more `seed` value" remedies.
+        "add_seed" | "add_init_seed" => ActionTargets {
             target_seed: observations
                 .iter()
                 .filter_map(|o| o.seed)
+                .max()
+                .map(|max_seed| max_seed + 1),
+            ..ActionTargets::default()
+        },
+        "add_shuffle_seed" => ActionTargets {
+            target_shuffle_seed: observations
+                .iter()
+                .filter_map(|o| o.shuffle_seed)
                 .max()
                 .map(|max_seed| max_seed + 1),
             ..ActionTargets::default()
@@ -367,6 +426,7 @@ fn distinct_count<'a>(ids: impl Iterator<Item = &'a str>) -> Option<usize> {
 pub struct ActionTargets {
     pub target_budget: Option<f64>,
     pub target_seed: Option<u64>,
+    pub target_shuffle_seed: Option<u64>,
     pub target_evaluator_slot: Option<usize>,
     pub target_model_slot: Option<usize>,
 }
@@ -385,6 +445,9 @@ mod tests {
             score_mad: 0.0,
             budget_sensitivity: 0.0,
             seed_sensitivity: 0.0,
+            order_sensitivity: 0.0,
+            teacher_conflict: 0.0,
+            gradient_instability: 0.0,
         }
     }
 
@@ -568,6 +631,9 @@ mod tests {
             score_mad: 0.0,
             budget_sensitivity: 0.0,
             seed_sensitivity: 5.0,
+            order_sensitivity: 0.0,
+            teacher_conflict: 0.0,
+            gradient_instability: 0.0,
         };
         let costs = ActiveReviewCosts {
             evaluator: 1.0,
@@ -652,9 +718,12 @@ mod tests {
             score_mad: if only == "score_mad" { 1.0 } else { 0.0 },
             budget_sensitivity: if only == "budget" { 1.0 } else { 0.0 },
             seed_sensitivity: if only == "seed" { 1.0 } else { 0.0 },
+            order_sensitivity: if only == "order" { 1.0 } else { 0.0 },
+            teacher_conflict: if only == "teacher" { 1.0 } else { 0.0 },
+            gradient_instability: if only == "gradient" { 1.0 } else { 0.0 },
         };
 
-        let cases: [(&str, Vec<Observation>, &str, &str); 5] = [
+        let cases: [(&str, Vec<Observation>, &str, &str); 8] = [
             (
                 "lcb",
                 vec![
@@ -744,6 +813,59 @@ mod tests {
                 "high_seed_sensitivity",
                 "add_seed",
             ),
+            (
+                "order",
+                vec![
+                    Observation {
+                        sample_id: "s".into(),
+                        score: Some(0.1),
+                        shuffle_seed: Some(1),
+                        ..Default::default()
+                    },
+                    Observation {
+                        sample_id: "s".into(),
+                        score: Some(0.9),
+                        shuffle_seed: Some(2),
+                        ..Default::default()
+                    },
+                ],
+                "high_order_sensitivity",
+                "add_shuffle_seed",
+            ),
+            (
+                "teacher",
+                vec![
+                    Observation {
+                        sample_id: "s".into(),
+                        teacher_residual: Some(0.9),
+                        ..Default::default()
+                    },
+                    Observation {
+                        sample_id: "s".into(),
+                        teacher_residual: Some(-0.9),
+                        ..Default::default()
+                    },
+                ],
+                "high_teacher_conflict",
+                "flag_teacher_conflict",
+            ),
+            (
+                "gradient",
+                vec![
+                    Observation {
+                        sample_id: "s".into(),
+                        gradient_sign: Some(0.1),
+                        ..Default::default()
+                    },
+                    Observation {
+                        sample_id: "s".into(),
+                        gradient_sign: Some(-0.1),
+                        ..Default::default()
+                    },
+                ],
+                "high_gradient_instability",
+                "add_init_seed",
+            ),
         ];
 
         let mut seen_actions = std::collections::HashSet::new();
@@ -769,8 +891,8 @@ mod tests {
         }
         assert_eq!(
             seen_actions.len(),
-            5,
-            "all five signals must map to distinct suggested_action strings"
+            8,
+            "all eight signals must map to distinct suggested_action strings"
         );
     }
 
@@ -791,6 +913,7 @@ mod tests {
             utility,
             target_budget: None,
             target_seed: None,
+            target_shuffle_seed: None,
             target_evaluator_slot: None,
             target_model_slot: None,
         }
@@ -925,5 +1048,106 @@ mod tests {
         let obs = vec![obs_with_seed(1), obs_with_evaluator("e1")];
         let targets = action_target_fields("increase_budget", &obs);
         assert_eq!(targets.target_budget, None);
+    }
+
+    #[test]
+    fn test_rank_active_review_is_order_independent() {
+        // n_total/n_keep (used by expected_coverage_gain/expected_risk_reduction) and the final
+        // sort (urgency_score desc, tie-broken by sample_id) are both order-independent by
+        // construction, so shuffling the input reports must produce an identical output Vec,
+        // not just an identical *set* of entries — a tool meant to measure order/seed
+        // sensitivity would be a bad joke if it were itself sensitive to input order.
+        let mut obs = Vec::new();
+        for i in 0..4 {
+            obs.push(Observation {
+                sample_id: "a".into(),
+                label: Some("win".into()),
+                evaluator_id: Some(format!("e{i}")),
+                ..Default::default()
+            });
+        }
+        obs.push(Observation {
+            sample_id: "b".into(),
+            label: Some("win".into()),
+            evaluator_id: Some("e0".into()),
+            ..Default::default()
+        });
+        obs.push(Observation {
+            sample_id: "b".into(),
+            label: Some("loss".into()),
+            evaluator_id: Some("e1".into()),
+            ..Default::default()
+        });
+        obs.push(Observation {
+            sample_id: "c".into(),
+            score: Some(0.1),
+            seed: Some(1),
+            ..Default::default()
+        });
+        obs.push(Observation {
+            sample_id: "c".into(),
+            score: Some(0.9),
+            seed: Some(2),
+            ..Default::default()
+        });
+
+        let config = ScoreConfig::default();
+        let reports = score_all(obs, &config);
+        let mut reversed = reports.clone();
+        reversed.reverse();
+
+        let weights = ActiveReviewWeights::default();
+        let costs = ActiveReviewCosts::default();
+        let thresholds = Thresholds::default();
+
+        let extract = |entries: &[ActiveReviewEntry]| -> Vec<(String, f64, &'static str, f64)> {
+            entries
+                .iter()
+                .map(|e| {
+                    (
+                        e.sample_id.clone(),
+                        e.urgency_score,
+                        e.suggested_action,
+                        e.utility,
+                    )
+                })
+                .collect()
+        };
+
+        let a = rank_active_review(
+            &reports,
+            &weights,
+            &costs,
+            &thresholds,
+            false,
+            RankBy::Urgency,
+        );
+        let b = rank_active_review(
+            &reversed,
+            &weights,
+            &costs,
+            &thresholds,
+            false,
+            RankBy::Urgency,
+        );
+        assert_eq!(extract(&a), extract(&b));
+
+        let a_util = rank_active_review(
+            &reports,
+            &weights,
+            &costs,
+            &thresholds,
+            false,
+            RankBy::Utility,
+        );
+        let b_util = rank_active_review(
+            &reversed,
+            &weights,
+            &costs,
+            &thresholds,
+            false,
+            RankBy::Utility,
+        );
+        assert_eq!(extract(&a_util), extract(&b_util));
     }
 }

@@ -422,6 +422,7 @@ quietset compare before.jsonl after.jsonl
 ```
 matched samples:  10000
 mean stability:   0.7412 → 0.7801
+rank stability:   0.8912  (Spearman's rho of stability_score ranks)
 
 decision transitions (before → after):
               →keep   →review    →drop
@@ -433,6 +434,8 @@ top 5 regressions:
   sample_001  0.9100 → 0.4400  (Δ-0.4700)
   sample_382  0.8800 → 0.3900  (Δ-0.4900)
 ```
+
+`rank stability` は、突合できたサンプルについて before/after の `stability_score` の順位間で計算したスピアマンの順位相関係数（同順位は平均順位で処理）です — `1.0` なら絶対値が変動しても相対的な順位は変わっていないこと、`-1.0` なら順位が完全に逆転したことを意味します。突合サンプルが2件未満、またはどちらかの側の分散がゼロ（未定義）の場合はtext/`--json`いずれの出力からも省略されます。`--json` では `rank_stability` として追加されます。
 
 `--json` フラグでマシン可読な JSON を出力できます。モデル更新・プロンプト変更・評価器変更の前後比較に使えます。
 
@@ -790,7 +793,13 @@ quietset active-review scored.jsonl --unstable-only --top 20
 {"budget_sensitivity":0.625,"cost":1.0,"expected_coverage_gain":1.0,"expected_risk_reduction":0.0,"label_agreement_flip_ratio":0.818,"label_agreement_lcb":0.301,"label_entropy":0.811,"primary_reason":"high_entropy","sample_id":"b","seed_sensitivity":0.075,"suggested_action":"add_evaluator","urgency_score":0.502,"utility":0.818}
 ```
 
-`--unstable-only` は問題のない keep サンプルをスキップします。信号ごとの `--weight-*` フラグ（`--weight-lcb`、`--weight-entropy`、`--weight-score-mad`、`--weight-budget-sensitivity`、`--weight-seed-sensitivity`）で、レビュー予算に応じて重視する信号を調整できます。`suggested_action` は `request_gold_label`、`add_evaluator`、`add_model`、`increase_budget`、`add_seed` のいずれかです（以前の `add_observations`/`diversify_evaluators`/`reduce_score_variance`/`add_budget`/`add_seeds` からの改名 — 破壊的変更、CHANGELOG参照）。
+`--unstable-only` は問題のない keep サンプルをスキップします。信号ごとの `--weight-*` フラグ（`--weight-lcb`、`--weight-entropy`、`--weight-score-mad`、`--weight-budget-sensitivity`、`--weight-seed-sensitivity`、`--weight-order-sensitivity`、`--weight-teacher-conflict`、`--weight-gradient-instability`）で、レビュー予算に応じて重視する信号を調整できます。`suggested_action` は `request_gold_label`、`add_evaluator`、`add_model`、`increase_budget`、`add_seed`、`add_shuffle_seed`、`flag_teacher_conflict`、`add_init_seed` のいずれかです（最初の5つは以前の `add_observations`/`diversify_evaluators`/`reduce_score_variance`/`add_budget`/`add_seeds` からの改名 — 破壊的変更、CHANGELOG参照。残り3つは軌道安定性向けに新規追加 — [軌道安定性フィールド](#軌道安定性フィールド省略可能)参照）。この3つの軌道信号は、`score`実行時に対応する`Observation`フィールド（`shuffle_seed`、`teacher_residual`、`gradient_sign`）が存在した場合にのみ発火します:
+
+| 信号 | `primary_reason` | `suggested_action` | コストフラグ |
+|------|-------------------|---------------------|-------------|
+| 順序依存性（`shuffle_seed_sensitivity`） | `high_order_sensitivity` | `add_shuffle_seed` | `--cost-shuffle-seed` |
+| teacher conflict（`1 - teacher_residual_stability`） | `high_teacher_conflict` | `flag_teacher_conflict` | `--cost-gold-label` |
+| gradient instability（`1 - gradient_sign_agreement`） | `high_gradient_instability` | `add_init_seed` | `--cost-seed` |
 
 5つの新しいフィールドが、緊急度ヒューリスティックを期待値ベースのランキングに拡張します:
 
@@ -823,10 +832,11 @@ quietset active-review scored.jsonl --observations input.jsonl
 `suggested_action` に対応するフィールドだけが、そのサンプル自身の observation から計算される:
 
 - `increase_budget` → `target_budget` = そのサンプルで観測された最大 `budget` × 2
-- `add_seed` → `target_seed` = そのサンプルで観測された最大 `seed` + 1
+- `add_seed` / `add_init_seed` → `target_seed` = そのサンプルで観測された最大 `seed` + 1（どちらも同じ`seed`フィールドをサイジングする——「もう1シード実行する」という同じ処置）
+- `add_shuffle_seed` → `target_shuffle_seed` = そのサンプルで観測された最大 `shuffle_seed` + 1
 - `add_evaluator` → `target_evaluator_slot` = そのサンプルの distinct `evaluator_id` 数 + 1
 - `add_model` → `target_model_slot` = そのサンプルの distinct `model_id` 数 + 1
-- `request_gold_label` → target field なし（サイジングする対象がないため）
+- `request_gold_label` / `flag_teacher_conflict` → target field なし（サイジングする対象がないため）
 
 `--observations` を渡さない場合はすべて省略され、observation ファイルに該当する生の値が存在しない場合もサンプルごとに省略される — 捏造した既定値になることはない。
 

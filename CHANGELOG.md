@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Added
+- Trajectory stability: 10 new optional `Observation` fields (`shuffle_seed`, `loss_recipe`,
+  `block_id`, `layer_id`, `gradient_sign`, `update_cosine`, `teacher_residual`,
+  `trajectory_effect`, `dead_unit_count`, `saturated_unit_count`) let a training harness feed
+  precomputed per-run trajectory signals into quietset the same way `score_sign_agreement`
+  already ingests signed scores — quietset never reads a checkpoint or computes a gradient
+  itself. `score` gains 5 new opt-in components (`gradient_sign_agreement`,
+  `update_direction_agreement`, `teacher_residual_stability`, shuffle-seed robustness,
+  `loss_recipe_agreement`; all `--weight-*` default `0.0`, so existing `stability_score` output
+  is unchanged unless explicitly weighted) plus diagnostic-only fields
+  (`update_cosine_mean`/`dead_unit_rate`/`saturated_unit_rate`/`trajectory_effect_mean`/
+  `trajectory_effect_sign_agreement`)
+- New `block-score` command: groups observations by `block_id` (e.g. a 32-position training
+  block) instead of `sample_id` and classifies each block's stability as `stable_growth`,
+  `stable_shrink`, `trajectory_sensitive`, `seed_sensitive`, `order_sensitive`, `pathological`,
+  or `insufficient`, from `block_stability = seed_effect_consistency ×
+  shuffle_direction_consistency × checkpoint_reproducibility`. Not a calibrated probability of
+  anything (see docs/metrics.md); `stable_growth`/`stable_shrink` are reproducibility labels,
+  not good/bad labels — every class routes to further validation, none is an automatic
+  keep/drop
+- New `trajectory-audit` command: diffs block-level stability between a `--before`/`--after`
+  observation file (e.g. two training checkpoints), reporting per-layer `dead_unit_delta`/
+  `saturated_unit_delta`, `trajectory_effect_delta`, before/after classification, and
+  `reproducibility_3seed`, sorted most-destructive-block first. `--group-size N` warns on
+  stderr for any block whose distinct sample count doesn't match `N`
+- `compare` gains `rank_stability`: Spearman's rank correlation (average-rank tie handling) of
+  `stability_score` ranks between the before/after files, alongside the existing transition
+  matrix
+- `active-review` gains 3 new urgency signals: `high_order_sensitivity` (→
+  `add_shuffle_seed`), `high_teacher_conflict` (→ `flag_teacher_conflict`), and
+  `high_gradient_instability` (→ `add_init_seed`), with matching `--weight-*`/`--cost-*` flags
+
 ## 0.15.0 — 2026-07-06
 
 ### Added

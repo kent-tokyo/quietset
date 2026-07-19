@@ -34,7 +34,9 @@ pub use active_review::{
     ActionTargets, ActiveReviewCosts, ActiveReviewEntry, ActiveReviewWeights, RankBy,
     action_target_fields, rank_active_review, select_within_budget,
 };
-pub use agreement::{compute_fleiss_kappa, compute_krippendorff_alpha};
+pub use agreement::{
+    compute_fleiss_kappa, compute_krippendorff_alpha, compute_spearman_rank_correlation,
+};
 pub use block::{
     BlockClass, BlockStabilityReport, BlockThresholds, compute_block_report, score_all_blocks,
 };

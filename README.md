@@ -501,6 +501,7 @@ quietset compare before.jsonl after.jsonl
 ```
 matched samples:  10000
 mean stability:   0.7412 → 0.7801
+rank stability:   0.8912  (Spearman's rho of stability_score ranks)
 
 decision transitions (before → after):
               →keep   →review    →drop
@@ -512,6 +513,12 @@ top 5 regressions:
   sample_001  0.9100 → 0.4400  (Δ-0.4700)
   sample_382  0.8800 → 0.3900  (Δ-0.4900)
 ```
+
+`rank stability` is Spearman's rank correlation (average-rank tie handling) between the
+before/after `stability_score` orderings among matched samples — `1.0` means the relative
+ranking didn't change at all even if absolute scores drifted, `-1.0` means the ranking fully
+reversed. Omitted (from both text and `--json` output) when fewer than 2 matched samples or
+either side has zero variance (undefined). `--json` adds it as `rank_stability`.
 
 Add `--json` for machine-readable output.
 
@@ -966,11 +973,22 @@ quietset active-review scored.jsonl --unstable-only --top 20
 
 `--unstable-only` skips samples already decided `keep` with no instability signals. Per-signal
 `--weight-*` flags (`--weight-lcb`, `--weight-entropy`, `--weight-score-mad`,
-`--weight-budget-sensitivity`, `--weight-seed-sensitivity`) let you emphasize the signal most
+`--weight-budget-sensitivity`, `--weight-seed-sensitivity`, `--weight-order-sensitivity`,
+`--weight-teacher-conflict`, `--weight-gradient-instability`) let you emphasize the signal most
 relevant to your review budget. `suggested_action` is one of `request_gold_label`,
-`add_evaluator`, `add_model`, `increase_budget`, `add_seed` (renamed from the earlier
+`add_evaluator`, `add_model`, `increase_budget`, `add_seed`, `add_shuffle_seed`,
+`flag_teacher_conflict`, `add_init_seed` (the first five renamed from the earlier
 `add_observations`/`diversify_evaluators`/`reduce_score_variance`/`add_budget`/`add_seeds` — a
-breaking change, see CHANGELOG).
+breaking change, see CHANGELOG; the last three added for trajectory stability — see
+[Trajectory stability fields](#trajectory-stability-fields-optional)). The 3 trajectory signals
+only fire when the corresponding `Observation` fields (`shuffle_seed`, `teacher_residual`,
+`gradient_sign`) were present when `score` ran:
+
+| Signal | `primary_reason` | `suggested_action` | Cost flag |
+|--------|-------------------|---------------------|-----------|
+| Order-dependency (`shuffle_seed_sensitivity`) | `high_order_sensitivity` | `add_shuffle_seed` | `--cost-shuffle-seed` |
+| Teacher conflict (`1 - teacher_residual_stability`) | `high_teacher_conflict` | `flag_teacher_conflict` | `--cost-gold-label` |
+| Gradient instability (`1 - gradient_sign_agreement`) | `high_gradient_instability` | `add_init_seed` | `--cost-seed` |
 
 Five additional fields turn the urgency heuristic into an expected-value ranking:
 
@@ -1032,12 +1050,15 @@ quietset active-review scored.jsonl --observations input.jsonl
 Only the field matching `suggested_action` is populated, from that sample's own observations:
 
 - `increase_budget` → `target_budget` = the sample's max observed `budget` × 2
-- `add_seed` → `target_seed` = the sample's max observed `seed` + 1
+- `add_seed` / `add_init_seed` → `target_seed` = the sample's max observed `seed` + 1 (both
+  actions size the same `seed` field — "run one more seed")
+- `add_shuffle_seed` → `target_shuffle_seed` = the sample's max observed `shuffle_seed` + 1
 - `add_evaluator` → `target_evaluator_slot` = the sample's distinct `evaluator_id` count + 1
 - `add_model` → `target_model_slot` = the sample's distinct `model_id` count + 1
-- `request_gold_label` → no target field (nothing to size for a label request)
+- `request_gold_label` / `flag_teacher_conflict` → no target field (nothing to size for a
+  review/label request)
 
-All four fields are omitted without `--observations`, and omitted per-sample whenever the
+All fields are omitted without `--observations`, and omitted per-sample whenever the
 relevant raw value is missing from the observations file — never a fabricated default.
 
 ## block-score command
