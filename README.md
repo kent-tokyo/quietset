@@ -231,7 +231,7 @@ itself:
 |-------|---------|
 | `shuffle_seed` | Second seed axis (data-order/shuffle), distinct from `seed` (init seed) |
 | `loss_recipe` | Loss-function/training-recipe variant — same role as `model_id`/`evaluator_id` |
-| `block_id` | Groups this sample into a training block (e.g. a 32-position block), distinct from `sample_id` |
+| `block_id` | Groups this sample into a training block (e.g. a 32-position block), distinct from `sample_id`. Must be unique within one input dataset and within one `trajectory-audit` before/after pair — a producer combining independent training runs into one file must namespace it itself, e.g. `"{run_id}:{block_id}"` |
 | `layer_id` | Generic layer identifier for `dead_unit_count`/`saturated_unit_count` — quietset assigns no meaning to specific values (e.g. `"ft"`, `"l2"` are just strings you choose) |
 | `gradient_sign` | Signed per-run scalar; only its sign is used |
 | `update_cosine` | Per-run cosine similarity of this update to a reference direction |
@@ -1087,7 +1087,7 @@ respectively). `classification` is one of:
 | `order_sensitive` | Unstable, and `shuffle_direction_consistency` is the lowest sub-threshold factor |
 | `trajectory_sensitive` | Unstable, and `checkpoint_reproducibility` is the lowest sub-threshold factor |
 | `pathological` | `dead_unit_rate`/`saturated_unit_rate` exceeds `--pathological-dead-rate` — overrides every other signal |
-| `insufficient` | Not enough condition-axis diversity (or no `trajectory_effect` to read a growth/shrink sign from) |
+| `insufficient` | Not enough condition-axis diversity (or no `trajectory_effect` to read a growth/shrink sign from), **or** the block mixes more than one non-null `loss_recipe` — see below |
 
 **`stable_growth`/`stable_shrink` are not "good"/"bad" labels** — they describe reproducibility
 of `trajectory_effect`'s sign, not whether that effect is desirable. Growth is not always an
@@ -1113,6 +1113,16 @@ improvement); validate against your own held-out data and match results before t
 gate training data unattended. See [docs/metrics.md](docs/metrics.md) for why the three
 consistency factors are multiplied rather than averaged. Warns on stderr (doesn't error) if no
 observation carries `block_id`.
+
+**A block mixing more than one non-null `loss_recipe` is never aggregated as ordinary
+variation.** Different recipes confound every other axis this classification measures — a
+block can't be called "seed-stable" or "pathological" if the loss function itself also changed
+underneath it. `block-score` warns on stderr and forces `classification` to `insufficient` for
+any such block (this overrides even `pathological`, since the dead/saturated-unit rate itself
+is confounded too). A block where `loss_recipe` is present but missing on some observations
+(all present values agreeing) only gets an "incomplete coverage" warning — classification is
+unaffected. `layer_id` is unrelated to this: a block naturally spans multiple layers, and
+mixing `layer_id` values within one block is normal, not a data problem.
 
 ## trajectory-audit command
 
@@ -1141,7 +1151,17 @@ blocks first. `--json` for machine-readable JSONL output (one object per block).
 `--group-size N` warns on stderr for any block whose distinct `sample_id` count doesn't match
 `N` on either side — a malformed block grouping (e.g. a truncated 32-position block), not a
 destructive-training signal. Same `--stable-threshold`/`--sensitivity-threshold`/
-`--pathological-dead-rate` flags as `block-score`.
+`--pathological-dead-rate` flags as `block-score`, including the same `loss_recipe`
+mixed/incomplete-coverage warnings on both `--before` and `--after`.
+
+**If a block's `loss_recipe` differs between `--before` and `--after`** (e.g. before is
+`"baseline"`, after is `"teacher_conflict_masking"`), the entry is not treated as an ordinary
+trajectory diff — recipe change and training progress can't be told apart from the deltas
+alone. Its `comparable` field is `false`, `comparison_issue` is `"loss_recipe_mismatch"`, and
+`dead_unit_delta`/`saturated_unit_delta`/`trajectory_effect_delta`/`reproducibility_3seed` are
+left empty/absent rather than computed (`before_classification`/`after_classification` are
+still each side's own report and remain meaningful). Text output prints `not comparable:
+loss_recipe_mismatch` for these blocks instead of the usual deltas.
 
 ## Rust API
 

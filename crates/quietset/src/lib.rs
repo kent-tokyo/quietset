@@ -38,7 +38,8 @@ pub use agreement::{
     compute_fleiss_kappa, compute_krippendorff_alpha, compute_spearman_rank_correlation,
 };
 pub use block::{
-    BlockClass, BlockStabilityReport, BlockThresholds, compute_block_report, score_all_blocks,
+    BlockClass, BlockStabilityReport, BlockThresholds, LossRecipeIssue, compute_block_report,
+    loss_recipe_issues, score_all_blocks,
 };
 pub use calibration::{CalibrationResult, compute_calibration};
 pub use config::{
@@ -55,7 +56,9 @@ pub use stable_wrong::{
     stable_wrong_breakdown,
 };
 pub use stream::StreamingScorer;
-pub use trajectory_audit::{TrajectoryAuditEntry, compute_trajectory_audit, group_size_mismatches};
+pub use trajectory_audit::{
+    ComparisonIssue, TrajectoryAuditEntry, compute_trajectory_audit, group_size_mismatches,
+};
 pub use weighting::{
     compute_evaluator_label_weights, compute_evaluator_reliability, compute_evaluator_weights,
     compute_weighted_majority, compute_weighted_majority_by_label,

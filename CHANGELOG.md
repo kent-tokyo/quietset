@@ -33,6 +33,23 @@
 - `active-review` gains 3 new urgency signals: `high_order_sensitivity` (→
   `add_shuffle_seed`), `high_teacher_conflict` (→ `flag_teacher_conflict`), and
   `high_gradient_instability` (→ `add_init_seed`), with matching `--weight-*`/`--cost-*` flags
+- `block_id` identity contract documented: must be unique within one input dataset and within
+  one `trajectory-audit` before/after pair; producers combining independent runs must
+  namespace it themselves (e.g. `"{run_id}:{block_id}"`). `layer_id` stays out of the block
+  key — a block legitimately spans multiple layers, which is exactly what
+  `trajectory-audit`'s per-layer deltas already assume
+- `block-score`/`trajectory-audit` no longer silently aggregate a block whose observations
+  mix more than one non-null `loss_recipe` — the recipe axis confounds every other signal
+  these commands measure. Such a block's classification is forced to `insufficient`
+  (overriding even `pathological`) and a warning is printed to stderr; a block where
+  `loss_recipe` is only partially populated (present values agreeing) gets an
+  "incomplete coverage" warning instead, with no change to its classification
+- `trajectory-audit` entries gain `comparable`/`comparison_issue`: when a block's `loss_recipe`
+  differs between `--before` and `--after` (or is internally mixed on either side), the entry
+  is marked `comparable: false`, `comparison_issue: "loss_recipe_mismatch"`, and the delta/
+  effect fields are left
+  empty/absent rather than computed — a recipe change and training progress can't be told
+  apart from the deltas alone
 
 ## 0.15.0 — 2026-07-06
 

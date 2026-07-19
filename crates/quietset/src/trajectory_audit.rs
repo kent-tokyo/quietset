@@ -2,32 +2,53 @@
 //! "after" observation set (e.g. two training checkpoints), surfacing blocks whose dead/
 //! saturated-unit rates spiked or whose net trajectory effect flipped.
 
-use crate::block::{BlockClass, BlockThresholds, compute_block_report};
+use crate::block::{BlockClass, BlockThresholds, compute_block_report, distinct_loss_recipes};
 use crate::group::group_by_block_id;
 use crate::observation::Observation;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+
+/// Why a block's before/after observations can't be diffed as an ordinary trajectory effect.
+/// See the `comparable`/`comparison_issue` handling in [`compute_trajectory_audit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonIssue {
+    /// The before and after sides disagree on `loss_recipe` (e.g. before is trained with
+    /// `"baseline"`, after with `"teacher_conflict_masking"`). Any delta between them would
+    /// conflate "training progressed" with "the recipe changed" — two different causes that
+    /// can't be told apart from the deltas alone, so they're not attributed to either.
+    LossRecipeMismatch,
+}
 
 /// Before/after diff for one block, from [`compute_trajectory_audit`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrajectoryAuditEntry {
     /// The block this entry describes.
     pub block_id: String,
+    /// `false` when `comparison_issue` is set — the delta/effect fields below are left at
+    /// their empty/`None` defaults rather than computed, since they'd misattribute a
+    /// recipe-driven change to training trajectory. `before_classification`/
+    /// `after_classification` are still each side's own report and remain meaningful.
+    pub comparable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison_issue: Option<ComparisonIssue>,
     /// Per `layer_id`: `after_rate - before_rate` for `dead_unit_rate`. Layers seen on only one
     /// side are treated as `0.0` on the other, so a brand-new problem layer still shows its
-    /// full `after_rate` as the delta.
+    /// full `after_rate` as the delta. Empty when `comparable` is `false`.
     pub dead_unit_delta: IndexMap<String, f64>,
-    /// Per `layer_id`: `after_rate - before_rate` for `saturated_unit_rate`.
+    /// Per `layer_id`: `after_rate - before_rate` for `saturated_unit_rate`. Empty when
+    /// `comparable` is `false`.
     pub saturated_unit_delta: IndexMap<String, f64>,
     /// `after.trajectory_effect_mean - before.trajectory_effect_mean`. `None` if either side
-    /// lacks `trajectory_effect`.
+    /// lacks `trajectory_effect`, or if `comparable` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trajectory_effect_delta: Option<f64>,
     pub before_classification: BlockClass,
     pub after_classification: BlockClass,
     /// `seed_effect_consistency` on the "after" side, but only when at least 3 distinct init
     /// seeds are present there — `None` otherwise, since fewer than 3 seeds is too little
-    /// evidence to call something "3-seed reproducible".
+    /// evidence to call something "3-seed reproducible". Also `None` if `comparable` is
+    /// `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reproducibility_3seed: Option<f64>,
 }
@@ -91,32 +112,61 @@ pub fn compute_trajectory_audit(
         let before_report = compute_block_report(block_id, before_obs, thresholds);
         let after_report = compute_block_report(block_id, after_obs, thresholds);
 
-        let dead_unit_delta = per_layer_delta(
-            &per_layer_rate(before_obs, |o| o.dead_unit_count),
-            &per_layer_rate(after_obs, |o| o.dead_unit_count),
-        );
-        let saturated_unit_delta = per_layer_delta(
-            &per_layer_rate(before_obs, |o| o.saturated_unit_count),
-            &per_layer_rate(after_obs, |o| o.saturated_unit_count),
-        );
-        let trajectory_effect_delta = before_report
-            .trajectory_effect_mean
-            .zip(after_report.trajectory_effect_mean)
-            .map(|(b, a)| a - b);
+        // Any loss_recipe inconsistency makes this pair non-comparable, whether it's within
+        // one side (before_report/after_report already read Insufficient for that reason, but
+        // the deltas below are computed from raw obs, not from the classification, so they'd
+        // still silently blend the mixed recipes) or between the two sides. Data that never
+        // uses loss_recipe at all (both sides empty) is unaffected, same as before this check
+        // existed.
+        let before_recipes = distinct_loss_recipes(before_obs);
+        let after_recipes = distinct_loss_recipes(after_obs);
+        let comparison_issue = (before_recipes.len() > 1
+            || after_recipes.len() > 1
+            || (!before_recipes.is_empty()
+                && !after_recipes.is_empty()
+                && before_recipes != after_recipes))
+            .then_some(ComparisonIssue::LossRecipeMismatch);
+        let comparable = comparison_issue.is_none();
 
-        let distinct_after_seeds = after_obs
-            .iter()
-            .filter_map(|o| o.seed)
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        let reproducibility_3seed = if distinct_after_seeds >= 3 {
-            after_report.seed_effect_consistency
-        } else {
-            None
-        };
+        let (dead_unit_delta, saturated_unit_delta, trajectory_effect_delta, reproducibility_3seed) =
+            if comparable {
+                let dead_unit_delta = per_layer_delta(
+                    &per_layer_rate(before_obs, |o| o.dead_unit_count),
+                    &per_layer_rate(after_obs, |o| o.dead_unit_count),
+                );
+                let saturated_unit_delta = per_layer_delta(
+                    &per_layer_rate(before_obs, |o| o.saturated_unit_count),
+                    &per_layer_rate(after_obs, |o| o.saturated_unit_count),
+                );
+                let trajectory_effect_delta = before_report
+                    .trajectory_effect_mean
+                    .zip(after_report.trajectory_effect_mean)
+                    .map(|(b, a)| a - b);
+
+                let distinct_after_seeds = after_obs
+                    .iter()
+                    .filter_map(|o| o.seed)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                let reproducibility_3seed = if distinct_after_seeds >= 3 {
+                    after_report.seed_effect_consistency
+                } else {
+                    None
+                };
+                (
+                    dead_unit_delta,
+                    saturated_unit_delta,
+                    trajectory_effect_delta,
+                    reproducibility_3seed,
+                )
+            } else {
+                (IndexMap::new(), IndexMap::new(), None, None)
+            };
 
         entries.push(TrajectoryAuditEntry {
             block_id: block_id.clone(),
+            comparable,
+            comparison_issue,
             dead_unit_delta,
             saturated_unit_delta,
             trajectory_effect_delta,
@@ -327,5 +377,92 @@ mod tests {
             assert_eq!(x.before_classification, y.before_classification);
             assert_eq!(x.after_classification, y.after_classification);
         }
+    }
+
+    // --- loss_recipe mismatch: a recipe change between checkpoints isn't a trajectory delta ---
+
+    #[test]
+    fn test_loss_recipe_mismatch_marks_entry_not_comparable() {
+        let mut before = vec![
+            obs("p1", "B5", Some("ft"), Some(0.0), Some(1), Some(-0.1)),
+            obs("p2", "B5", Some("ft"), Some(0.0), Some(2), Some(-0.1)),
+        ];
+        let mut after = vec![
+            obs("p1", "B5", Some("ft"), Some(5.0), Some(1), Some(-0.5)),
+            obs("p2", "B5", Some("ft"), Some(4.0), Some(2), Some(-0.6)),
+        ];
+        for o in before.iter_mut() {
+            o.loss_recipe = Some("baseline".into());
+        }
+        for o in after.iter_mut() {
+            o.loss_recipe = Some("teacher_conflict_masking".into());
+        }
+        let entries = compute_trajectory_audit(before, after, &BlockThresholds::default());
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].comparable);
+        assert_eq!(
+            entries[0].comparison_issue,
+            Some(ComparisonIssue::LossRecipeMismatch)
+        );
+        // The delta/effect fields must not be populated -- they'd conflate recipe change with
+        // training progress.
+        assert!(entries[0].dead_unit_delta.is_empty());
+        assert!(entries[0].saturated_unit_delta.is_empty());
+        assert_eq!(entries[0].trajectory_effect_delta, None);
+        assert_eq!(entries[0].reproducibility_3seed, None);
+        // Each side's own classification is independent of cross-side comparability and stays.
+        assert_ne!(
+            entries[0].before_classification,
+            entries[0].after_classification
+        );
+    }
+
+    #[test]
+    fn test_same_loss_recipe_both_sides_is_comparable() {
+        let mut before = vec![obs("p1", "B5", Some("ft"), Some(0.0), Some(1), Some(-0.1))];
+        let mut after = vec![obs("p1", "B5", Some("ft"), Some(5.0), Some(1), Some(-0.5))];
+        before[0].loss_recipe = Some("baseline".into());
+        after[0].loss_recipe = Some("baseline".into());
+        let entries = compute_trajectory_audit(before, after, &BlockThresholds::default());
+        assert!(entries[0].comparable);
+        assert_eq!(entries[0].comparison_issue, None);
+        assert_eq!(entries[0].dead_unit_delta.get("ft"), Some(&1.0));
+    }
+
+    #[test]
+    fn test_loss_recipe_mixed_within_one_side_is_not_comparable_even_if_sets_match() {
+        // Both sides internally mix the same two recipes -- before_recipes == after_recipes as
+        // sets, so a naive cross-side-only check would call this comparable. But each side's
+        // own classification is already Insufficient for this reason, and the deltas below are
+        // computed straight from obs, not from that classification, so they'd still blend the
+        // mixed recipes silently if this weren't caught.
+        let mut before = vec![
+            obs("p1", "B5", Some("ft"), Some(0.0), Some(1), Some(-0.1)),
+            obs("p2", "B5", Some("ft"), Some(0.0), Some(2), Some(-0.1)),
+        ];
+        let mut after = vec![
+            obs("p1", "B5", Some("ft"), Some(5.0), Some(1), Some(-0.5)),
+            obs("p2", "B5", Some("ft"), Some(4.0), Some(2), Some(-0.6)),
+        ];
+        before[0].loss_recipe = Some("recipe_a".into());
+        before[1].loss_recipe = Some("recipe_b".into());
+        after[0].loss_recipe = Some("recipe_a".into());
+        after[1].loss_recipe = Some("recipe_b".into());
+        let entries = compute_trajectory_audit(before, after, &BlockThresholds::default());
+        assert!(!entries[0].comparable);
+        assert_eq!(
+            entries[0].comparison_issue,
+            Some(ComparisonIssue::LossRecipeMismatch)
+        );
+    }
+
+    #[test]
+    fn test_missing_loss_recipe_on_both_sides_is_comparable() {
+        // Existing behavior for data that never uses loss_recipe at all: no regression.
+        let before = vec![obs("p1", "B5", Some("ft"), Some(0.0), Some(1), Some(-0.1))];
+        let after = vec![obs("p1", "B5", Some("ft"), Some(5.0), Some(1), Some(-0.5))];
+        let entries = compute_trajectory_audit(before, after, &BlockThresholds::default());
+        assert!(entries[0].comparable);
+        assert_eq!(entries[0].comparison_issue, None);
     }
 }

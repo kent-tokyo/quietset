@@ -196,7 +196,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 |-----------|------|
 | `shuffle_seed` | 第2のシード軸（データ順序/シャッフル）。`seed`（初期化シード）とは別軸 |
 | `loss_recipe` | 損失関数/学習レシピのバリアント — `model_id`/`evaluator_id`と同じ役割の条件軸 |
-| `block_id` | サンプルを学習ブロック（例: 32局面ブロック）にグループ化する。`sample_id`とは別 |
+| `block_id` | サンプルを学習ブロック（例: 32局面ブロック）にグループ化する。`sample_id`とは別。1つの入力データセット内、および`trajectory-audit`のbefore/afterペア内で一意である必要がある——複数runを1ファイルへ統合するproducerは`"{run_id}:{block_id}"`のように自身で名前空間化すること |
 | `layer_id` | `dead_unit_count`/`saturated_unit_count`用の汎用レイヤー識別子 — quietsetは値そのものに意味を持たせない（例: `"ft"`、`"l2"`は単なる文字列） |
 | `gradient_sign` | 符号付きの実行ごとのスカラー値。符号のみが使われる |
 | `update_cosine` | この更新方向と基準方向とのコサイン類似度（実行ごと） |
@@ -863,7 +863,7 @@ checkpoint_reproducibility` — 計算可能な因子（それぞれ対応する
 | `order_sensitive` | 不安定で、`shuffle_direction_consistency`が閾値未満の因子の中で最も低い |
 | `trajectory_sensitive` | 不安定で、`checkpoint_reproducibility`が閾値未満の因子の中で最も低い |
 | `pathological` | `dead_unit_rate`/`saturated_unit_rate`が`--pathological-dead-rate`を超える — 他のすべての信号より優先される |
-| `insufficient` | 条件軸の多様性が不足している（または成長/縮小の符号を読み取る`trajectory_effect`が無い） |
+| `insufficient` | 条件軸の多様性が不足している（または成長/縮小の符号を読み取る`trajectory_effect`が無い）、**または**ブロック内に非nullの`loss_recipe`が複数混在している——下記参照 |
 
 **`stable_growth`/`stable_shrink`は「善」「悪」のラベルではありません** — これらは`trajectory_effect`の符号の再現性を表すものであり、その効果が望ましいかどうかを表すものではありません。成長が常に改善とは限らず、縮小が常に悪化とは限りません（dead/saturatedユニット率の上昇を伴う縮小は別途`pathological`として捕捉されますが、健全な縮小は健全な正則化かもしれません）。自身のheld-out/downstream検証が完了するまでの推奨運用は以下の通りです:
 
@@ -878,6 +878,8 @@ checkpoint_reproducibility` — 計算可能な因子（それぞれ対応する
 | `stable_shrink` | downstream検証へ送る——自動除外しない |
 
 `--stable-threshold`（デフォルト`0.85`）、`--sensitivity-threshold`（デフォルト`0.5`）、`--pathological-dead-rate`（デフォルト`0.5`）が分類を調整します。`score`の`--keep-threshold`/`--drop-threshold`と同じく「運用上のデフォルト値であり、導出された定数ではない」という位置づけです——**何かのキャリブレーションされた確率ではありません**（特に、対局の棋力向上に対するキャリブレーションされた確率ではありません）。無人でこの分類に学習データの選別を任せる前に、自分自身のheld-outデータと対局結果で検証してください。3つの一貫性因子がなぜ平均ではなく積になっているかは[docs/metrics.md](docs/metrics.md)を参照してください。`block_id`を持つ観測が1つもない場合はstderrに警告を出します（エラーにはなりません）。
+
+**非nullの`loss_recipe`が複数混在するブロックは、通常のばらつきとして集約されません。** 異なるレシピはこの分類が測定する他のすべての軸と交絡します——loss関数自体が途中で変わったブロックを「seed安定」や「pathological」と呼ぶことはできません。`block-score`はそのようなブロックについてstderrに警告し、`classification`を`insufficient`に強制します（dead/saturated unit率自体も交絡しているため、これは`pathological`より優先されます）。`loss_recipe`が一部の観測にのみ存在し（存在する値はすべて一致している）欠損がある場合は、「incomplete coverage」警告のみが出て分類には影響しません。`layer_id`はこれとは無関係です——1つのブロックは複数の層にまたがるのが自然であり、ブロック内で`layer_id`が複数混在することは正常であり、データの問題ではありません。
 
 ## trajectory-audit コマンド
 
@@ -895,7 +897,9 @@ B5  stable_shrink → pathological
 
 `block_id`でブロックを突合し（片側にしか存在しないブロックはスキップ）、突合できた各ブロックについて次を報告します: `dead_unit_delta`/`saturated_unit_delta`（`layer_id`ごとに`after_rate - before_rate`。片側にしか存在しないレイヤーはもう片方を`0.0`として扱うため、新規に問題化したレイヤーもその`after_rate`がそのままdeltaとして表示される）、`trajectory_effect_delta`、`before_classification`/`after_classification`、`reproducibility_3seed`（after側で`seed`が3種類以上存在する場合のみの`seed_effect_consistency`）。dead/saturatedユニットのdelta絶対値が大きいブロックから順にソートされます。`--json`でマシン可読なJSONL出力（ブロックごとに1オブジェクト）。
 
-`--group-size N`は、どちらかの側で`block_id`ごとの distinct `sample_id`数が`N`と一致しないブロックについてstderrに警告します — これは破壊的な学習の兆候ではなく、ブロックのグルーピングが壊れている（例: 32局面ブロックが途中で切れている）ことを示します。`block-score`と同じ`--stable-threshold`/`--sensitivity-threshold`/`--pathological-dead-rate`フラグを持ちます。
+`--group-size N`は、どちらかの側で`block_id`ごとの distinct `sample_id`数が`N`と一致しないブロックについてstderrに警告します — これは破壊的な学習の兆候ではなく、ブロックのグルーピングが壊れている（例: 32局面ブロックが途中で切れている）ことを示します。`block-score`と同じ`--stable-threshold`/`--sensitivity-threshold`/`--pathological-dead-rate`フラグを持ち、`--before`/`--after`両方について同じ`loss_recipe`混在/incomplete coverage警告も出します。
+
+**あるブロックの`loss_recipe`が`--before`と`--after`で異なる場合**（例: beforeが`"baseline"`、afterが`"teacher_conflict_masking"`）、そのエントリは通常の軌道差分としては扱われません——レシピの変更と学習の進行は、deltaだけからは区別できないためです。`comparable`フィールドは`false`になり、`comparison_issue`は`"loss_recipe_mismatch"`になり、`dead_unit_delta`/`saturated_unit_delta`/`trajectory_effect_delta`/`reproducibility_3seed`は計算されずに空/欠如のままになります（`before_classification`/`after_classification`はそれぞれの側単独の報告であり、引き続き意味を持ちます）。テキスト出力では、これらのブロックについて通常のdeltaの代わりに`not comparable: loss_recipe_mismatch`と表示されます。
 
 ## Rust API
 

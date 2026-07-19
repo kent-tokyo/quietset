@@ -34,6 +34,11 @@ pub struct Observation {
     pub loss_recipe: Option<String>,
     /// Groups this sample into a training block (e.g. a 32-position block) for block-level
     /// stability analysis, distinct from `sample_id`.
+    ///
+    /// Must be unique within one input dataset and within one `trajectory-audit` before/after
+    /// pair — quietset has no run-level field to disambiguate an accidental ID collision from
+    /// an intentional cross-checkpoint match. A producer combining independent training runs
+    /// into one file must namespace the identifier itself, e.g. `"{run_id}:{block_id}"`.
     pub block_id: Option<String>,
     /// Generic layer identifier for `dead_unit_count`/`saturated_unit_count`. quietset assigns
     /// no meaning to specific values — the caller's training harness decides what "ft", "l2",

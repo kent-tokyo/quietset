@@ -9,12 +9,13 @@ use std::collections::HashMap;
 
 use quietset::{
     ActiveReviewCosts, ActiveReviewWeights, BlockThresholds, Decision, DecisionScore,
-    LatentTruthSafety, MinRequirements, Observation, RankBy, ScoreConfig, ScoreDispersion,
-    ScoreWeights, StabilityReport, Thresholds, action_target_fields, compute_calibration,
-    compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha,
-    compute_spearman_rank_correlation, compute_trajectory_audit, group_size_mismatches, parse_csv,
-    parse_jsonl, rank_active_review, score_all, score_all_blocks, score_all_gold_weighted,
-    score_all_latent_truth, score_all_weighted, select_within_budget,
+    LatentTruthSafety, LossRecipeIssue, MinRequirements, Observation, RankBy, ScoreConfig,
+    ScoreDispersion, ScoreWeights, StabilityReport, Thresholds, action_target_fields,
+    compute_calibration, compute_evaluator_reliability, compute_fleiss_kappa,
+    compute_krippendorff_alpha, compute_spearman_rank_correlation, compute_trajectory_audit,
+    group_size_mismatches, loss_recipe_issues, parse_csv, parse_jsonl, rank_active_review,
+    score_all, score_all_blocks, score_all_gold_weighted, score_all_latent_truth,
+    score_all_weighted, select_within_budget,
 };
 
 #[derive(Parser)]
@@ -2553,12 +2554,26 @@ fn run_reliability(args: ReliabilityArgs) -> Result<()> {
     Ok(())
 }
 
+fn print_loss_recipe_warnings(observations: &[Observation]) {
+    for (block_id, issue) in loss_recipe_issues(observations) {
+        match issue {
+            LossRecipeIssue::Mixed { recipes } => eprintln!(
+                "warning: block {block_id} mixes loss_recipe values {recipes:?}; treating as insufficient"
+            ),
+            LossRecipeIssue::IncompleteCoverage { recipe } => eprintln!(
+                "warning: block {block_id} has incomplete loss_recipe coverage (some observations missing it, present value is {recipe:?})"
+            ),
+        }
+    }
+}
+
 fn run_block_score(args: BlockScoreArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
     let observations = read_observations_jsonl(&raw, args.skip_invalid)?;
     if observations.is_empty() {
         anyhow::bail!("no observations found");
     }
+    print_loss_recipe_warnings(&observations);
     let thresholds = BlockThresholds {
         stable: args.stable_threshold,
         sensitivity: args.sensitivity_threshold,
@@ -2590,6 +2605,8 @@ fn run_trajectory_audit(args: TrajectoryAuditArgs) -> Result<()> {
             );
         }
     }
+    print_loss_recipe_warnings(&before);
+    print_loss_recipe_warnings(&after);
 
     let thresholds = BlockThresholds {
         stable: args.stable_threshold,
@@ -2610,6 +2627,13 @@ fn run_trajectory_audit(args: TrajectoryAuditArgs) -> Result<()> {
                 "{}  {} → {}",
                 entry.block_id, entry.before_classification, entry.after_classification
             );
+            if let Some(issue) = &entry.comparison_issue {
+                println!(
+                    "  not comparable: {}",
+                    serde_json::to_string(issue)?.trim_matches('"')
+                );
+                continue;
+            }
             for (layer, delta) in &entry.dead_unit_delta {
                 if *delta != 0.0 {
                     println!("  dead_unit_delta[{layer}]:       {delta:+.4}");

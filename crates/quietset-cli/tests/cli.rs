@@ -766,6 +766,49 @@ fn trajectory_audit_reports_nothing_when_no_blocks_match() {
     assert!(stderr(&out).contains("nothing to report"));
 }
 
+#[test]
+fn block_score_warns_and_marks_insufficient_on_mixed_loss_recipe() {
+    let path = write_temp(
+        "block_score_mixed_recipe.jsonl",
+        "{\"sample_id\":\"p1\",\"block_id\":\"B5\",\"seed\":1,\"trajectory_effect\":0.3,\"loss_recipe\":\"recipe_a\"}\n\
+         {\"sample_id\":\"p2\",\"block_id\":\"B5\",\"seed\":2,\"trajectory_effect\":0.4,\"loss_recipe\":\"recipe_b\"}\n",
+    );
+    let out = run(&["block-score", path.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("mixes loss_recipe values"),
+        "{}",
+        stderr(&out)
+    );
+    let value: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(value["classification"], "insufficient");
+}
+
+#[test]
+fn trajectory_audit_marks_loss_recipe_mismatch_not_comparable() {
+    let before = write_temp(
+        "trajectory_audit_recipe_before.jsonl",
+        "{\"sample_id\":\"p1\",\"block_id\":\"B5\",\"loss_recipe\":\"baseline\",\"dead_unit_count\":0}\n",
+    );
+    let after = write_temp(
+        "trajectory_audit_recipe_after.jsonl",
+        "{\"sample_id\":\"p1\",\"block_id\":\"B5\",\"loss_recipe\":\"teacher_conflict_masking\",\"dead_unit_count\":5}\n",
+    );
+    let out = run(&[
+        "trajectory-audit",
+        "--before",
+        before.to_str().unwrap(),
+        "--after",
+        after.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(value["comparable"], false);
+    assert_eq!(value["comparison_issue"], "loss_recipe_mismatch");
+    assert!(value["dead_unit_delta"].as_object().unwrap().is_empty());
+}
+
 // Regression guard for the trajectory-stability feature set: `score --output-format csv` is a
 // hand-written fixed-column writer that was never updated to include the 5 new components, so
 // its header must be byte-for-byte identical to what it was before this feature existed. If a

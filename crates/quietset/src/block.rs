@@ -137,6 +137,59 @@ pub struct BlockStabilityReport {
     pub classification: BlockClass,
 }
 
+/// A loss-recipe consistency problem found within one block's observations. See
+/// [`loss_recipe_issues`] and the override in [`compute_block_report`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum LossRecipeIssue {
+    /// More than one distinct non-null `loss_recipe` present in this block. We do not
+    /// aggregate different loss recipes into one block score because their effects are
+    /// confounded with seed, shuffle order, and checkpoint variation — a block cannot be
+    /// "seed-stable" or "pathological" in a way attributable to any one axis if the recipe
+    /// itself also changed underneath it. Until recipe-level stability is modeled explicitly
+    /// (a dedicated `loss_recipe_consistency` factor), a mixed block is `Insufficient` rather
+    /// than evidence of instability.
+    Mixed { recipes: Vec<String> },
+    /// All present `loss_recipe` values agree, but some observations in this block carry
+    /// none at all. Classification is unaffected — this is only an operator warning that the
+    /// field isn't consistently populated.
+    IncompleteCoverage { recipe: String },
+}
+
+/// Distinct non-null `loss_recipe` values across `obs`, sorted for deterministic comparison.
+pub(crate) fn distinct_loss_recipes(obs: &[Observation]) -> Vec<String> {
+    obs.iter()
+        .filter_map(|o| o.loss_recipe.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn loss_recipe_issue(obs: &[Observation]) -> Option<LossRecipeIssue> {
+    let recipes = distinct_loss_recipes(obs);
+    match recipes.len() {
+        0 => None,
+        1 => obs.iter().any(|o| o.loss_recipe.is_none()).then(|| {
+            LossRecipeIssue::IncompleteCoverage {
+                recipe: recipes[0].clone(),
+            }
+        }),
+        _ => Some(LossRecipeIssue::Mixed { recipes }),
+    }
+}
+
+/// Scans every block in `observations` for a loss-recipe consistency problem (see
+/// [`LossRecipeIssue`]), in first-seen block order. Used by the `block-score`/
+/// `trajectory-audit` CLI commands to warn operators without failing the whole run over a
+/// partial data problem.
+pub fn loss_recipe_issues(observations: &[Observation]) -> Vec<(String, LossRecipeIssue)> {
+    let groups = crate::group::group_by_block_id(observations.iter().cloned());
+    groups
+        .iter()
+        .filter_map(|(id, obs)| loss_recipe_issue(obs).map(|issue| (id.clone(), issue)))
+        .collect()
+}
+
 /// Groups `obs` by `key_fn`, averages `value_fn` within each group, and returns the
 /// sign-agreement of those per-group means. `None` if fewer than 2 groups have a value.
 /// This is the cross-condition-axis analogue of `scoring::compute_range_sensitivity`: instead
@@ -295,6 +348,13 @@ pub fn compute_block_report(
         classification: BlockClass::Insufficient,
     };
     report.classification = classify(&report, thresholds);
+    // Mixed non-null loss_recipe values within a block override the classification above —
+    // see LossRecipeIssue::Mixed for why the recipe axis can't be aggregated like model_id/
+    // seed/shuffle_seed can. This takes priority even over Pathological: a mixed-recipe block's
+    // dead/saturated-unit rate can't be trusted to mean what Pathological's doc says it means.
+    if matches!(loss_recipe_issue(obs), Some(LossRecipeIssue::Mixed { .. })) {
+        report.classification = BlockClass::Insufficient;
+    }
     report
 }
 
@@ -618,6 +678,107 @@ mod tests {
         };
         let report = compute_block_report("b1", &observations, &thresholds);
         assert_eq!(report.classification, BlockClass::SeedSensitive);
+    }
+
+    // --- loss_recipe consistency: mixed recipes must not be silently aggregated ---
+
+    #[test]
+    fn test_mixed_loss_recipe_forces_insufficient_even_over_stable_growth() {
+        // Otherwise a clean stable_growth fixture (see test_stable_growth) -- but the two
+        // observations disagree on loss_recipe, so the classification must not be trusted.
+        let mut observations = vec![
+            obs("s1", Some(1), Some(1), Some("ckpt1"), Some(0.3), Some(0.9)),
+            obs("s1", Some(2), Some(2), Some("ckpt2"), Some(0.4), Some(0.8)),
+        ];
+        observations[0].loss_recipe = Some("recipe_a".into());
+        observations[1].loss_recipe = Some("recipe_b".into());
+        let report = compute_block_report("b1", &observations, &BlockThresholds::default());
+        assert_eq!(report.classification, BlockClass::Insufficient);
+    }
+
+    #[test]
+    fn test_mixed_loss_recipe_overrides_pathological_too() {
+        // Even a block that would otherwise read as Pathological must not be trusted once
+        // its loss_recipe is mixed -- the dead_unit_rate itself is confounded.
+        let mut observations = vec![
+            obs("s1", Some(1), Some(1), Some("ckpt1"), Some(0.3), Some(0.9)),
+            obs("s1", Some(2), Some(2), Some("ckpt2"), Some(0.4), Some(0.8)),
+        ];
+        observations[0].dead_unit_count = Some(5.0);
+        observations[1].dead_unit_count = Some(3.0);
+        observations[0].loss_recipe = Some("recipe_a".into());
+        observations[1].loss_recipe = Some("recipe_b".into());
+        let report = compute_block_report("b1", &observations, &BlockThresholds::default());
+        assert_eq!(report.classification, BlockClass::Insufficient);
+    }
+
+    #[test]
+    fn test_incomplete_loss_recipe_coverage_does_not_change_classification() {
+        // Same stable_growth fixture, but only one of the two observations carries
+        // loss_recipe (the other has none) -- both present values agree, so this is a
+        // coverage gap, not a mix, and must not affect the classification.
+        let mut observations = vec![
+            obs("s1", Some(1), Some(1), Some("ckpt1"), Some(0.3), Some(0.9)),
+            obs("s1", Some(2), Some(2), Some("ckpt2"), Some(0.4), Some(0.8)),
+        ];
+        observations[0].loss_recipe = Some("recipe_a".into());
+        let report = compute_block_report("b1", &observations, &BlockThresholds::default());
+        assert_eq!(report.classification, BlockClass::StableGrowth);
+    }
+
+    #[test]
+    fn test_loss_recipe_issues_reports_mixed_and_incomplete_but_not_clean_blocks() {
+        let mut observations = vec![
+            // B1: mixed non-null recipes.
+            obs("s1", Some(1), Some(1), Some("ckpt1"), Some(0.3), Some(0.9)),
+            obs("s1", Some(2), Some(2), Some("ckpt2"), Some(0.4), Some(0.8)),
+            // B2: one recipe, one missing -- incomplete coverage.
+            obs("s2", Some(1), Some(1), Some("ckpt1"), Some(0.3), Some(0.9)),
+            obs("s2", Some(2), Some(2), Some("ckpt2"), Some(0.4), Some(0.8)),
+            // B3: no loss_recipe at all on either observation -- clean, no issue.
+            obs("s3", Some(1), Some(1), Some("ckpt1"), Some(0.3), Some(0.9)),
+            obs("s3", Some(2), Some(2), Some("ckpt2"), Some(0.4), Some(0.8)),
+        ];
+        for o in observations.iter_mut() {
+            o.block_id = Some(
+                match o.sample_id.as_str() {
+                    "s1" => "B1",
+                    "s2" => "B2",
+                    _ => "B3",
+                }
+                .into(),
+            );
+        }
+        observations[0].loss_recipe = Some("recipe_a".into());
+        observations[1].loss_recipe = Some("recipe_b".into());
+        observations[2].loss_recipe = Some("recipe_a".into());
+        // observations[3] (B2's other half) intentionally left with no loss_recipe.
+
+        let issues = loss_recipe_issues(&observations);
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        let b1 = issues.iter().find(|(id, _)| id == "B1").unwrap();
+        assert!(matches!(&b1.1, LossRecipeIssue::Mixed { recipes }
+                if *recipes == vec!["recipe_a".to_string(), "recipe_b".to_string()]));
+        let b2 = issues.iter().find(|(id, _)| id == "B2").unwrap();
+        assert!(
+            matches!(&b2.1, LossRecipeIssue::IncompleteCoverage { recipe } if recipe == "recipe_a")
+        );
+        assert!(issues.iter().all(|(id, _)| id != "B3"));
+    }
+
+    #[test]
+    fn test_multiple_layer_ids_within_one_block_is_normal() {
+        // A block naturally spans multiple layers (see group_by_block_id's doc) -- this must
+        // not error, warn, or affect classification, unlike a mixed loss_recipe.
+        let mut observations = vec![
+            obs("s1", Some(1), Some(1), Some("ckpt1"), Some(0.3), Some(0.9)),
+            obs("s1", Some(2), Some(2), Some("ckpt2"), Some(0.4), Some(0.8)),
+        ];
+        observations[0].layer_id = Some("ft".into());
+        observations[1].layer_id = Some("l2".into());
+        let report = compute_block_report("b1", &observations, &BlockThresholds::default());
+        assert_eq!(report.classification, BlockClass::StableGrowth);
+        assert!(loss_recipe_issues(&observations).is_empty());
     }
 
     // --- determinism: computed values must not depend on input observation order ---
