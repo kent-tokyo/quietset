@@ -172,6 +172,43 @@ but keep the formula/assumptions/failure-mode depth here, not duplicated there.
 - **quietset usage**: always computed; excluded from `stability_score` by default
   (`--weight-score-sign 0`); `--profile game-ai` weights it `×2` by default.
 
+## Trajectory stability metrics (gradient_sign_agreement, update_direction_agreement, teacher_residual_stability, shuffle_seed_sensitivity, loss_recipe_agreement)
+
+- **Formula**: each reuses an existing generic verbatim, just applied to a new field —
+  `gradient_sign_agreement`/`update_direction_agreement` reuse the `sign_agreement` helper
+  `score_sign_agreement` already uses; `teacher_residual_stability` is
+  `1 - normalized_std(teacher_residual)`, the same shape as `score_consistency`;
+  `shuffle_seed_sensitivity` reuses `compute_range_sensitivity` keyed on `shuffle_seed` instead
+  of `seed`; `loss_recipe_agreement` reuses `compute_group_label_agreement` keyed on
+  `loss_recipe` instead of `model_id`/`evaluator_id` (`crates/quietset/src/scoring.rs`).
+- **Provenance**: none — domain-agnostic heuristics for harness-supplied trajectory signals,
+  same status as `score_sign_agreement`.
+- **Interpretation**: cross-run consistency of a training-trajectory signal the harness
+  computed upstream (quietset never touches a gradient or checkpoint itself — see
+  `docs/research-map.md` for why this stays outside quietset's non-goals). `None` when the
+  underlying `Observation` field is absent.
+- **Assumptions/failure modes**: same as the metrics they reuse — `sign_agreement` treats a
+  zero value as its own third bucket (see `score_sign_agreement` above); `shuffle_seed_sensitivity`
+  needs ≥2 distinct `shuffle_seed` values to be computable, same gate as `seed_sensitivity`.
+- **quietset usage**: all five are computed whenever their input field is present, but excluded
+  from `stability_score` by default (`ScoreWeights::{gradient_sign,update_cosine,
+  teacher_residual,shuffle_seed,loss_recipe}` all default `0.0`, exactly like `score_sign`) —
+  opt in via `--weight-gradient-sign`/`--weight-update-cosine`/`--weight-teacher-residual`/
+  `--weight-shuffle-seed`/`--weight-loss-recipe`.
+
+## dead_unit_rate / saturated_unit_rate / trajectory_effect_mean / trajectory_effect_sign_agreement
+
+- **Formula**: `dead_unit_rate`/`saturated_unit_rate` = fraction of observations carrying
+  `dead_unit_count`/`saturated_unit_count` where the value is `> 0.0`;
+  `trajectory_effect_mean`/`trajectory_effect_sign_agreement` = mean and `sign_agreement` of
+  `trajectory_effect` (`crates/quietset/src/scoring.rs`).
+- **Provenance**: none — diagnostic-only fields, not part of `stability_score`.
+- **Interpretation**: how often a sample induces new dead/saturated units, and whether its net
+  training effect (e.g. a radial-norm delta) is growing or shrinking. These feed `block-score`'s
+  classification (pathological override, growth/shrink sign) rather than per-sample stability.
+- **quietset usage**: `block-score`/`trajectory-audit` (see below); no `ScoreWeights` field
+  exists for these — they never enter `stability_score`.
+
 ## keep / drop thresholds (0.85 / 0.40)
 
 - **Formula**: none — `Thresholds::default()` (`crates/quietset/src/decision.rs:11-18`).

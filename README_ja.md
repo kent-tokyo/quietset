@@ -180,6 +180,27 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 
 `gold_label` はサンプルの既知の正解ラベルです。指定されている場合、`reliability` コマンドが多数派ラベルの代わりにこれを正解として使います。
 
+### 軌道安定性フィールド（省略可能）
+
+学習ハーネス側で事前計算した実行ごとの軌道信号を、`block-score`/`trajectory-audit`および下記の`score`コンポーネント向けに渡すための、追加の省略可能フィールドが10個あります。quietsetはこれらの数値を集計するだけで、checkpointを読んだり勾配を自分で計算したりすることは一切ありません:
+
+```json
+{"sample_id":"p1","block_id":"B5","seed":1,"shuffle_seed":1,"model_id":"ckpt143","loss_recipe":"recipe_a","layer_id":"ft","gradient_sign":0.3,"update_cosine":0.8,"teacher_residual":0.02,"trajectory_effect":-0.4,"dead_unit_count":0,"saturated_unit_count":0}
+```
+
+| フィールド | 意味 |
+|-----------|------|
+| `shuffle_seed` | 第2のシード軸（データ順序/シャッフル）。`seed`（初期化シード）とは別軸 |
+| `loss_recipe` | 損失関数/学習レシピのバリアント — `model_id`/`evaluator_id`と同じ役割の条件軸 |
+| `block_id` | サンプルを学習ブロック（例: 32局面ブロック）にグループ化する。`sample_id`とは別 |
+| `layer_id` | `dead_unit_count`/`saturated_unit_count`用の汎用レイヤー識別子 — quietsetは値そのものに意味を持たせない（例: `"ft"`、`"l2"`は単なる文字列） |
+| `gradient_sign` | 符号付きの実行ごとのスカラー値。符号のみが使われる |
+| `update_cosine` | この更新方向と基準方向とのコサイン類似度（実行ごと） |
+| `teacher_residual` | 符号付きの実行ごとのスカラー値（例: モデル出力からteacher出力を引いた値） |
+| `trajectory_effect` | ブロックの成長/縮小分類を駆動する符号付きの実行ごとのスカラー値（例: radial normの変化量）。正=成長、負=縮小 |
+| `dead_unit_count` | この（sample, run）における`layer_id`内の新規dead unit数 |
+| `saturated_unit_count` | この（sample, run）における`layer_id`内の新規saturated unit数 |
+
 ## 出力 JSONL フォーマット
 
 主要フィールド（計算できない場合は省略されます）:
@@ -230,6 +251,11 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `model_agreement` | モデル間のラベル一致度 |
 | `evaluator_agreement` | 評価者間のラベル一致度 |
 | `score_sign_agreement` | 数値スコアの多数派符号が占める割合 — デフォルトの重みは `0`（除外）。`--weight-score-sign` で有効化できる（`--profile game-ai` はデフォルトで `×2` 有効） |
+| `gradient_sign_agreement` | `gradient_sign` の多数派符号が占める割合 — デフォルトの重みは `0`。`--weight-gradient-sign` で有効化 |
+| `update_direction_agreement` | `update_cosine` の多数派符号が占める割合 — デフォルトの重みは `0`。`--weight-update-cosine` で有効化 |
+| `teacher_residual_stability` | `1 - normalized_std(teacher_residual)` — デフォルトの重みは `0`。`--weight-teacher-residual` で有効化 |
+| shuffle-seed robustness | `1 - shuffle_seed_sensitivity` — デフォルトの重みは `0`。`--weight-shuffle-seed` で有効化 |
+| `loss_recipe_agreement` | `loss_recipe` 間のラベル一致度 — デフォルトの重みは `0`。`--weight-loss-recipe` で有効化 |
 
 対応するフィールドがない次元（例：ラベルなし、budget なし）は平均から除外されます。観測が1件のみのサンプルは `stability_score = 0.5`（デフォルトで `review`）になります。
 
@@ -246,6 +272,9 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `budget_slope` | budget 増加に対するスコアの傾き（正 = 上昇収束） |
 | `confidence` | `n / (n + k)` — 証拠量に基づくスコアの信頼度 |
 | `adjusted_stability_score` | `stability * confidence + 0.5 * (1 - confidence)` |
+| `update_cosine_mean` | `update_cosine` の平均値。診断のみで `stability_score` のコンポーネントではない |
+| `dead_unit_rate` / `saturated_unit_rate` | `dead_unit_count`/`saturated_unit_count`が`0`より大きい観測の割合 — このサンプルが新規dead/saturatedユニットをどれだけ誘発するか。診断のみで`stability_score`には含まれず、`block-score`のpathological分類に使われる |
+| `trajectory_effect_mean` / `trajectory_effect_sign_agreement` | `trajectory_effect`の平均値と符号一致率。診断のみで`stability_score`には含まれず、`block-score`の成長/縮小分類に使われる |
 
 ### components フィールドで理由を確認できる
 

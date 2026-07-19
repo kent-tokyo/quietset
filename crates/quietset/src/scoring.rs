@@ -64,6 +64,51 @@ fn percentile_of_sorted(sorted: &[f64], p: f64) -> f64 {
     }
 }
 
+/// Fraction of `values` sharing the majority sign (negative / zero / positive). `None` if
+/// `values` is empty. Shared by `score_sign_agreement` and every trajectory sign-agreement
+/// metric (`gradient_sign_agreement`, `update_direction_agreement`, `trajectory_effect_sign_agreement`).
+pub(crate) fn sign_agreement(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let (mut neg, mut zero, mut pos) = (0usize, 0usize, 0usize);
+    for v in values {
+        if *v > 0.0 {
+            pos += 1;
+        } else if *v < 0.0 {
+            neg += 1;
+        } else {
+            zero += 1;
+        }
+    }
+    Some(neg.max(zero).max(pos) as f64 / values.len() as f64)
+}
+
+/// Population mean and standard deviation of `values`. `None` if `values` is empty.
+fn mean_std(values: &[f64]) -> Option<(f64, f64)> {
+    if values.is_empty() {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    Some((mean, variance.sqrt()))
+}
+
+/// Fraction of `field`'s present values that are `> 0.0` (e.g. a nonzero dead/saturated-unit
+/// count) — the induction rate for that condition. `None` if `field` is absent from every
+/// observation.
+pub(crate) fn induced_rate(
+    obs: &[Observation],
+    field: impl Fn(&Observation) -> Option<f64>,
+) -> Option<f64> {
+    let values: Vec<f64> = obs.iter().filter_map(field).collect();
+    if values.is_empty() {
+        return None;
+    }
+    let induced = values.iter().filter(|v| **v > 0.0).count();
+    Some(induced as f64 / values.len() as f64)
+}
+
 /// Compute a [`StabilityReport`] for one sample from its observations.
 ///
 /// See the trust-boundary note on [`score_all`]: `obs` is expected to already be
@@ -105,6 +150,19 @@ pub(crate) fn compute_report_inner(
             o.budget.is_none_or(f64::is_finite),
             "compute_report: non-finite budget (call Observation::validate() before scoring)"
         );
+        for (field, value) in [
+            ("gradient_sign", o.gradient_sign),
+            ("update_cosine", o.update_cosine),
+            ("teacher_residual", o.teacher_residual),
+            ("trajectory_effect", o.trajectory_effect),
+            ("dead_unit_count", o.dead_unit_count),
+            ("saturated_unit_count", o.saturated_unit_count),
+        ] {
+            debug_assert!(
+                value.is_none_or(f64::is_finite),
+                "compute_report: non-finite {field} (call Observation::validate() before scoring)"
+            );
+        }
     }
     let n = obs.len();
 
@@ -195,21 +253,7 @@ pub(crate) fn compute_report_inner(
         (None, None)
     };
 
-    let score_sign_agreement = if scores.is_empty() {
-        None
-    } else {
-        let (mut neg, mut zero, mut pos) = (0usize, 0usize, 0usize);
-        for s in &scores {
-            if *s > 0.0 {
-                pos += 1;
-            } else if *s < 0.0 {
-                neg += 1;
-            } else {
-                zero += 1;
-            }
-        }
-        Some(neg.max(zero).max(pos) as f64 / scores.len() as f64)
-    };
+    let score_sign_agreement = sign_agreement(&scores);
 
     // --- sensitivity / agreement ---
     let budget_sensitivity = compute_range_sensitivity(
@@ -227,6 +271,33 @@ pub(crate) fn compute_report_inner(
     );
     let model_agreement = compute_group_label_agreement(obs, |o| o.model_id.as_deref());
     let evaluator_agreement = compute_group_label_agreement(obs, |o| o.evaluator_id.as_deref());
+
+    // --- trajectory stability ---
+    let gradient_signs: Vec<f64> = obs.iter().filter_map(|o| o.gradient_sign).collect();
+    let gradient_sign_agreement = sign_agreement(&gradient_signs);
+
+    let update_cosines: Vec<f64> = obs.iter().filter_map(|o| o.update_cosine).collect();
+    let update_cosine_mean = mean_std(&update_cosines).map(|(m, _)| m);
+    let update_direction_agreement = sign_agreement(&update_cosines);
+
+    let teacher_residuals: Vec<f64> = obs.iter().filter_map(|o| o.teacher_residual).collect();
+    let teacher_residual_stability =
+        mean_std(&teacher_residuals).map(|(_, std)| 1.0 - (std / config.score_scale).min(1.0));
+
+    let trajectory_effects: Vec<f64> = obs.iter().filter_map(|o| o.trajectory_effect).collect();
+    let trajectory_effect_mean = mean_std(&trajectory_effects).map(|(m, _)| m);
+    let trajectory_effect_sign_agreement = sign_agreement(&trajectory_effects);
+
+    let shuffle_seed_sensitivity = compute_range_sensitivity(
+        obs,
+        |o| o.shuffle_seed.map(|s| OrderedFloat(s as f64)),
+        |o| o.score,
+        config.score_scale,
+    );
+    let loss_recipe_agreement = compute_group_label_agreement(obs, |o| o.loss_recipe.as_deref());
+
+    let dead_unit_rate = induced_rate(obs, |o| o.dead_unit_count);
+    let saturated_unit_rate = induced_rate(obs, |o| o.saturated_unit_count);
 
     // --- stability_score (weighted mean of available sub-scores) ---
     // ponytail: single obs = low-confidence, always review
@@ -280,6 +351,26 @@ pub(crate) fn compute_report_inner(
         if let Some(ea) = evaluator_agreement {
             wsum += ea * w.evaluator_agreement;
             wtotal += w.evaluator_agreement;
+        }
+        if let Some(ga) = gradient_sign_agreement {
+            wsum += ga * w.gradient_sign;
+            wtotal += w.gradient_sign;
+        }
+        if let Some(ua) = update_direction_agreement {
+            wsum += ua * w.update_cosine;
+            wtotal += w.update_cosine;
+        }
+        if let Some(ts) = teacher_residual_stability {
+            wsum += ts * w.teacher_residual;
+            wtotal += w.teacher_residual;
+        }
+        if let Some(sss) = shuffle_seed_sensitivity {
+            wsum += (1.0 - sss) * w.shuffle_seed;
+            wtotal += w.shuffle_seed;
+        }
+        if let Some(lra) = loss_recipe_agreement {
+            wsum += lra * w.loss_recipe;
+            wtotal += w.loss_recipe;
         }
 
         if wtotal > 0.0 { wsum / wtotal } else { 0.5 }
@@ -348,6 +439,11 @@ pub(crate) fn compute_report_inner(
         seed_robustness: seed_sensitivity.map(|s| 1.0 - s),
         model_agreement,
         evaluator_agreement,
+        gradient_sign_agreement,
+        update_direction_agreement,
+        teacher_residual_stability,
+        shuffle_seed_robustness: shuffle_seed_sensitivity.map(|s| 1.0 - s),
+        loss_recipe_agreement,
     };
 
     StabilityReport {
@@ -384,6 +480,16 @@ pub(crate) fn compute_report_inner(
         seed_sensitivity,
         model_agreement,
         evaluator_agreement,
+        gradient_sign_agreement,
+        update_cosine_mean,
+        update_direction_agreement,
+        teacher_residual_stability,
+        shuffle_seed_sensitivity,
+        loss_recipe_agreement,
+        dead_unit_rate,
+        saturated_unit_rate,
+        trajectory_effect_mean,
+        trajectory_effect_sign_agreement,
         confidence,
         adjusted_stability_score,
         disagreement_score,

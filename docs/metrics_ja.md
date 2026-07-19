@@ -89,6 +89,21 @@ quietset が出力するすべての数値について、数式・出典・解�
 - **failure mode**: ゼロ値のスコアは独立した第3のバケツを形成し、正負どちらにも統合されない — 厳密なゼロが多いバッチでは「ゼロ」自体が多数派の符号になり得る。
 - **quietset での使い方**: 常に計算されるが、デフォルトでは `stability_score` から除外される（`--weight-score-sign 0`）。`--profile game-ai` はデフォルトで `×2` の重みを付ける。
 
+## 軌道安定性指標（gradient_sign_agreement、update_direction_agreement、teacher_residual_stability、shuffle_seed_sensitivity、loss_recipe_agreement）
+
+- **数式**: いずれも既存の汎用関数をそのまま別のフィールドに適用したもの — `gradient_sign_agreement`/`update_direction_agreement`は`score_sign_agreement`が使う`sign_agreement`ヘルパーをそのまま再利用、`teacher_residual_stability`は`score_consistency`と同じ形の`1 - normalized_std(teacher_residual)`、`shuffle_seed_sensitivity`は`compute_range_sensitivity`を`seed`ではなく`shuffle_seed`でキーして再利用、`loss_recipe_agreement`は`compute_group_label_agreement`を`model_id`/`evaluator_id`ではなく`loss_recipe`でキーして再利用（`crates/quietset/src/scoring.rs`）。
+- **出典**: なし — ハーネス側が供給する軌道信号向けのドメイン非依存ヒューリスティック。`score_sign_agreement`と同じ位置づけ。
+- **解釈**: ハーネス側が事前計算した学習軌道信号のcross-run一貫性（quietset自身は勾配やcheckpointに一切触れない — なぜこれがquietsetのnon-goalsの範囲外にとどまるかは`docs/research-map.md`参照）。対応する`Observation`フィールドが無ければ`None`。
+- **前提/failure mode**: それぞれが再利用する指標と同じ — `sign_agreement`はゼロ値を独立した第3のバケツとして扱う（上記`score_sign_agreement`参照）。`shuffle_seed_sensitivity`は`seed_sensitivity`と同じく、異なる`shuffle_seed`が2つ以上必要。
+- **quietset での使い方**: 対応するフィールドが存在すれば常に計算されるが、`score_sign`と全く同様に`stability_score`からはデフォルトで除外される（`ScoreWeights::{gradient_sign,update_cosine,teacher_residual,shuffle_seed,loss_recipe}`はすべてデフォルト`0.0`）——`--weight-gradient-sign`/`--weight-update-cosine`/`--weight-teacher-residual`/`--weight-shuffle-seed`/`--weight-loss-recipe`で有効化。
+
+## dead_unit_rate / saturated_unit_rate / trajectory_effect_mean / trajectory_effect_sign_agreement
+
+- **数式**: `dead_unit_rate`/`saturated_unit_rate` = `dead_unit_count`/`saturated_unit_count`を持つ観測のうち値が`0.0`より大きいものの割合。`trajectory_effect_mean`/`trajectory_effect_sign_agreement` = `trajectory_effect`の平均値と`sign_agreement`（`crates/quietset/src/scoring.rs`）。
+- **出典**: なし — 診断専用フィールドで、`stability_score`の一部ではない。
+- **解釈**: あるサンプルがどれだけ頻繁に新規のdead/saturatedユニットを誘発するか、また正味の学習効果（例: radial normの変化量）が成長方向か縮小方向か。これらは`block-score`の分類（pathologicalの上書き、成長/縮小の符号）に使われ、サンプル単位の安定性には使われない。
+- **quietset での使い方**: `block-score`/`trajectory-audit`（下記参照）。これらに対応する`ScoreWeights`フィールドは存在せず、`stability_score`には一切入らない。
+
 ## keep / drop 閾値（0.85 / 0.40）
 
 - **数式**: なし — `Thresholds::default()`（`crates/quietset/src/decision.rs:11-18`）。

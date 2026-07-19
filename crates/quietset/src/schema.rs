@@ -51,6 +51,26 @@ pub struct StabilityComponents {
     /// Label agreement across evaluators.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evaluator_agreement: Option<f64>,
+    /// Fraction of `gradient_sign` observations sharing the majority sign. Only contributes to
+    /// `stability_score` when `ScoreWeights::gradient_sign` is set above its default `0.0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradient_sign_agreement: Option<f64>,
+    /// Fraction of `update_cosine` observations sharing the majority sign. Only contributes to
+    /// `stability_score` when `ScoreWeights::update_cosine` is set above its default `0.0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_direction_agreement: Option<f64>,
+    /// `1 - normalized_std(teacher_residual)`. Only contributes to `stability_score` when
+    /// `ScoreWeights::teacher_residual` is set above its default `0.0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teacher_residual_stability: Option<f64>,
+    /// Shuffle-seed robustness (`1 - shuffle_seed_sensitivity`). Only contributes to
+    /// `stability_score` when `ScoreWeights::shuffle_seed` is set above its default `0.0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shuffle_seed_robustness: Option<f64>,
+    /// Label agreement across `loss_recipe` values. Only contributes to `stability_score` when
+    /// `ScoreWeights::loss_recipe` is set above its default `0.0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loss_recipe_agreement: Option<f64>,
 }
 
 impl StabilityComponents {
@@ -58,7 +78,9 @@ impl StabilityComponents {
     ///
     /// Ties are resolved by the fixed component declaration order:
     /// `label` → `score_consistency` → `budget_robustness` → `seed_robustness`
-    /// → `model_agreement` → `evaluator_agreement`.
+    /// → `model_agreement` → `evaluator_agreement` → `gradient_sign_agreement` →
+    /// `update_direction_agreement` → `teacher_residual_stability` → `shuffle_seed_robustness`
+    /// → `loss_recipe_agreement`.
     pub fn weakest(&self) -> Option<(&'static str, f64)> {
         let candidates = [
             ("label", self.label),
@@ -68,6 +90,17 @@ impl StabilityComponents {
             ("seed_robustness", self.seed_robustness),
             ("model_agreement", self.model_agreement),
             ("evaluator_agreement", self.evaluator_agreement),
+            ("gradient_sign_agreement", self.gradient_sign_agreement),
+            (
+                "update_direction_agreement",
+                self.update_direction_agreement,
+            ),
+            (
+                "teacher_residual_stability",
+                self.teacher_residual_stability,
+            ),
+            ("shuffle_seed_robustness", self.shuffle_seed_robustness),
+            ("loss_recipe_agreement", self.loss_recipe_agreement),
         ];
         candidates
             .into_iter()
@@ -208,6 +241,42 @@ pub struct StabilityReport {
     /// Fraction of evaluators whose majority label matches the overall majority; `None` if fewer than two evaluators. (`[0.0, 1.0]`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evaluator_agreement: Option<f64>,
+    /// Fraction of `gradient_sign` observations sharing the majority sign. `None` if no
+    /// observation carries `gradient_sign`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradient_sign_agreement: Option<f64>,
+    /// Mean of `update_cosine` across observations. `None` if none carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_cosine_mean: Option<f64>,
+    /// Fraction of `update_cosine` observations sharing the majority sign. `None` if none carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_direction_agreement: Option<f64>,
+    /// `1 - normalized_std(teacher_residual)`. `None` if no observation carries `teacher_residual`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teacher_residual_stability: Option<f64>,
+    /// Normalized range of per-shuffle-seed mean scores; `None` if fewer than two shuffle seeds. (`[0.0, 1.0]`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shuffle_seed_sensitivity: Option<f64>,
+    /// Fraction of `loss_recipe` values whose majority label matches the overall majority;
+    /// `None` if fewer than two distinct recipes have labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loss_recipe_agreement: Option<f64>,
+    /// Fraction of observations carrying `dead_unit_count` where it is `> 0.0` — how often this
+    /// sample induces new dead units. `None` if no observation carries `dead_unit_count`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dead_unit_rate: Option<f64>,
+    /// Fraction of observations carrying `saturated_unit_count` where it is `> 0.0`. `None` if
+    /// no observation carries `saturated_unit_count`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saturated_unit_rate: Option<f64>,
+    /// Mean of `trajectory_effect` across observations — positive means net growth, negative
+    /// net shrink. `None` if no observation carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trajectory_effect_mean: Option<f64>,
+    /// Fraction of `trajectory_effect` observations sharing the majority sign. `None` if none
+    /// carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trajectory_effect_sign_agreement: Option<f64>,
     /// Reliability confidence based on observation count: n / (n + confidence_k). In [0, 1].
     pub confidence: f64,
     /// stability_score adjusted for confidence: stability_score * confidence + 0.5 * (1 - confidence)

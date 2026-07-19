@@ -85,6 +85,18 @@ pub struct ScoreWeights {
     /// changing every existing user's score by default would be a silent behavior break.
     /// Set explicitly (e.g. via `--weight-score-sign`) to opt in.
     pub score_sign: f64,
+    /// Weight for `gradient_sign_agreement`. Defaults to `0.0` — same reasoning as
+    /// `score_sign`: a new diagnostic dimension must not silently change existing scores.
+    pub gradient_sign: f64,
+    /// Weight for `update_direction_agreement`. Defaults to `0.0`, same reasoning as `score_sign`.
+    pub update_cosine: f64,
+    /// Weight for `teacher_residual_stability`. Defaults to `0.0`, same reasoning as `score_sign`.
+    pub teacher_residual: f64,
+    /// Weight for shuffle-seed stability (`1 - shuffle_seed_sensitivity`). Defaults to `0.0`,
+    /// same reasoning as `score_sign`.
+    pub shuffle_seed: f64,
+    /// Weight for `loss_recipe_agreement`. Defaults to `0.0`, same reasoning as `score_sign`.
+    pub loss_recipe: f64,
 }
 
 impl Default for ScoreWeights {
@@ -97,6 +109,11 @@ impl Default for ScoreWeights {
             model_agreement: 1.0,
             evaluator_agreement: 1.0,
             score_sign: 0.0,
+            gradient_sign: 0.0,
+            update_cosine: 0.0,
+            teacher_residual: 0.0,
+            shuffle_seed: 0.0,
+            loss_recipe: 0.0,
         }
     }
 }
@@ -207,6 +224,11 @@ impl ScoreConfig {
             ("model_agreement", w.model_agreement),
             ("evaluator_agreement", w.evaluator_agreement),
             ("score_sign", w.score_sign),
+            ("gradient_sign", w.gradient_sign),
+            ("update_cosine", w.update_cosine),
+            ("teacher_residual", w.teacher_residual),
+            ("shuffle_seed", w.shuffle_seed),
+            ("loss_recipe", w.loss_recipe),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(crate::error::Error::InvalidWeight { name, value });
@@ -219,6 +241,11 @@ impl ScoreConfig {
             + w.model_agreement
             + w.evaluator_agreement
             + w.score_sign
+            + w.gradient_sign
+            + w.update_cosine
+            + w.teacher_residual
+            + w.shuffle_seed
+            + w.loss_recipe
             == 0.0
         {
             return Err(crate::error::Error::AllWeightsZero);

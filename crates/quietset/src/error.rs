@@ -8,6 +8,8 @@ pub enum Error {
     InvalidScore { line: usize },
     #[error("invalid budget value at line {line}: must be finite")]
     InvalidBudget { line: usize },
+    #[error("invalid {field} value at line {line}: must be finite")]
+    InvalidField { field: &'static str, line: usize },
     #[error("score_scale must be positive and finite, got {0}")]
     InvalidScoreScale(f64),
     #[error("confidence_k must be finite and >= 0.0, got {0}")]

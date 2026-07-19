@@ -391,6 +391,11 @@ fn test_all_zero_weights_is_error() {
             model_agreement: 0.0,
             evaluator_agreement: 0.0,
             score_sign: 0.0,
+            gradient_sign: 0.0,
+            update_cosine: 0.0,
+            teacher_residual: 0.0,
+            shuffle_seed: 0.0,
+            loss_recipe: 0.0,
         },
         ..ScoreConfig::default()
     };
@@ -434,6 +439,11 @@ fn test_weakest_component_tie_is_deterministic() {
         seed_robustness: Some(0.5),
         model_agreement: Some(0.5),
         evaluator_agreement: Some(0.5),
+        gradient_sign_agreement: None,
+        update_direction_agreement: None,
+        teacher_residual_stability: None,
+        shuffle_seed_robustness: None,
+        loss_recipe_agreement: None,
     };
     // tie resolved by fixed declaration order — "label" always wins
     for _ in 0..20 {
@@ -2145,6 +2155,23 @@ fn test_score_all_panics_on_non_finite_score_bypassing_parser() {
     let _ = score_all(obs, &ScoreConfig::default());
 }
 
+// Same trust-boundary guard as above, extended to the trajectory fields added alongside
+// gradient_sign_agreement etc. — a caller bypassing parse_jsonl/validate() with a NaN/inf
+// trajectory field should hit a loud debug-build panic, not a silently wrong sign_agreement
+// bucket (NaN compares false to both `> 0.0` and `< 0.0`, so it would otherwise land in the
+// "zero" bucket unnoticed).
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "call Observation::validate() before scoring")]
+fn test_score_all_panics_on_non_finite_trajectory_effect_bypassing_parser() {
+    let obs = vec![Observation {
+        sample_id: "a".into(),
+        trajectory_effect: Some(f64::INFINITY),
+        ..Default::default()
+    }];
+    let _ = score_all(obs, &ScoreConfig::default());
+}
+
 // Fixture shared by the correlated-warning and min-effective-n demotion tests below: 3
 // reliable evaluators (R1-R3) + 2 evaluators (TW1, TW2) identical to each other (correct on
 // the first half of training samples, both wrong together on the second half). Target sample
@@ -2354,4 +2381,326 @@ fn test_latent_truth_non_convergence_off_by_default_locks_backward_compat() {
     let clean = score_non_convergence(LatentTruthSafety::default());
     assert_eq!(clean.decision, Decision::Keep);
     assert!(clean.latent_truth_demotion_reason.is_none());
+}
+
+// --- trajectory stability (Phase 1) ---
+
+#[test]
+fn test_gradient_sign_agreement() {
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            gradient_sign: Some(0.4),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            gradient_sign: Some(0.2),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            gradient_sign: Some(-0.1),
+            ..Default::default()
+        },
+    ];
+    let r = &score_all(obs, &ScoreConfig::default())[0];
+    assert_eq!(r.gradient_sign_agreement, Some(2.0 / 3.0));
+}
+
+#[test]
+fn test_update_cosine_mean_and_direction_agreement() {
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            update_cosine: Some(0.8),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            update_cosine: Some(0.6),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            update_cosine: Some(-0.2),
+            ..Default::default()
+        },
+    ];
+    let r = &score_all(obs, &ScoreConfig::default())[0];
+    assert!((r.update_cosine_mean.unwrap() - 0.4).abs() < 1e-10);
+    assert_eq!(r.update_direction_agreement, Some(2.0 / 3.0));
+}
+
+#[test]
+fn test_teacher_residual_stability() {
+    // Tight cluster of residuals -> low std -> high stability.
+    let tight = vec![
+        Observation {
+            sample_id: "a".into(),
+            teacher_residual: Some(0.01),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            teacher_residual: Some(-0.01),
+            ..Default::default()
+        },
+    ];
+    let r_tight = &score_all(tight, &ScoreConfig::default())[0];
+    assert!(r_tight.teacher_residual_stability.unwrap() > 0.95);
+
+    // Wide spread -> low stability.
+    let wide = vec![
+        Observation {
+            sample_id: "a".into(),
+            teacher_residual: Some(0.9),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            teacher_residual: Some(-0.9),
+            ..Default::default()
+        },
+    ];
+    let r_wide = &score_all(wide, &ScoreConfig::default())[0];
+    assert!(r_wide.teacher_residual_stability.unwrap() < 0.5);
+
+    // Absent entirely -> None.
+    let none = vec![Observation {
+        sample_id: "a".into(),
+        ..Default::default()
+    }];
+    assert!(
+        score_all(none, &ScoreConfig::default())[0]
+            .teacher_residual_stability
+            .is_none()
+    );
+}
+
+#[test]
+fn test_shuffle_seed_sensitivity_mirrors_seed_sensitivity() {
+    let jsonl = r#"{"sample_id":"a","label":"win","score":0.95,"shuffle_seed":1}
+{"sample_id":"a","label":"win","score":0.05,"shuffle_seed":2}"#;
+    let obs = parse_jsonl(jsonl).unwrap();
+    let reports = score_all(obs, &ScoreConfig::default());
+    assert!(reports[0].shuffle_seed_sensitivity.is_some());
+    assert!(reports[0].shuffle_seed_sensitivity.unwrap() > 0.5);
+}
+
+#[test]
+fn test_loss_recipe_agreement_mirrors_model_agreement() {
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            loss_recipe: Some("recipe_a".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            loss_recipe: Some("recipe_b".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            label: Some("loss".into()),
+            loss_recipe: Some("recipe_c".into()),
+            ..Default::default()
+        },
+    ];
+    let r = &score_all(obs, &ScoreConfig::default())[0];
+    assert!((r.loss_recipe_agreement.unwrap() - 2.0 / 3.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_dead_and_saturated_unit_rate() {
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            layer_id: Some("ft".into()),
+            dead_unit_count: Some(3.0),
+            saturated_unit_count: Some(0.0),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            layer_id: Some("ft".into()),
+            dead_unit_count: Some(0.0),
+            saturated_unit_count: Some(0.0),
+            ..Default::default()
+        },
+    ];
+    let r = &score_all(obs, &ScoreConfig::default())[0];
+    assert_eq!(r.dead_unit_rate, Some(0.5));
+    assert_eq!(r.saturated_unit_rate, Some(0.0));
+
+    let none = vec![Observation {
+        sample_id: "a".into(),
+        ..Default::default()
+    }];
+    let r_none = &score_all(none, &ScoreConfig::default())[0];
+    assert!(r_none.dead_unit_rate.is_none());
+    assert!(r_none.saturated_unit_rate.is_none());
+}
+
+#[test]
+fn test_trajectory_effect_mean_and_sign_agreement() {
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            trajectory_effect: Some(-0.3),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            trajectory_effect: Some(-0.1),
+            ..Default::default()
+        },
+    ];
+    let r = &score_all(obs, &ScoreConfig::default())[0];
+    assert!((r.trajectory_effect_mean.unwrap() - (-0.2)).abs() < 1e-10);
+    assert_eq!(r.trajectory_effect_sign_agreement, Some(1.0));
+}
+
+#[test]
+fn test_trajectory_weights_zero_by_default_leave_stability_score_unchanged() {
+    // Every new dimension present, all at their default 0.0 weight: stability_score should
+    // depend only on label_agreement here, exactly as if the new fields didn't exist.
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            gradient_sign: Some(0.1),
+            update_cosine: Some(-0.9),
+            teacher_residual: Some(5.0),
+            shuffle_seed: Some(1),
+            loss_recipe: Some("x".into()),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            gradient_sign: Some(-0.1),
+            update_cosine: Some(0.9),
+            teacher_residual: Some(-5.0),
+            shuffle_seed: Some(2),
+            loss_recipe: Some("y".into()),
+            ..Default::default()
+        },
+    ];
+    let r = &score_all(obs, &ScoreConfig::default())[0];
+    assert_eq!(
+        r.stability_score, 1.0,
+        "unweighted trajectory fields must not affect stability_score by default"
+    );
+}
+
+#[test]
+fn test_trajectory_weight_explicit_pulls_stability_score_down() {
+    let obs = vec![
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            gradient_sign: Some(0.1),
+            ..Default::default()
+        },
+        Observation {
+            sample_id: "a".into(),
+            label: Some("win".into()),
+            gradient_sign: Some(-0.1),
+            ..Default::default()
+        },
+    ];
+    let config = ScoreConfig {
+        weights: ScoreWeights {
+            gradient_sign: 5.0,
+            ..ScoreWeights::default()
+        },
+        ..ScoreConfig::default()
+    };
+    let r = &score_all(obs, &config)[0];
+    assert!(
+        r.stability_score < 1.0,
+        "explicit gradient_sign weight should pull a sign-split sample below perfect stability, got {}",
+        r.stability_score
+    );
+}
+
+#[test]
+fn test_trajectory_fields_absent_leaves_json_output_byte_for_byte_unchanged() {
+    // No trajectory field appears anywhere in this fixture, and every new ScoreWeights entry
+    // defaults to 0.0 -- so every new StabilityReport/StabilityComponents field must be
+    // skip_serializing_if=None (fully absent from the JSON), not present-as-null, and every
+    // pre-existing field's value must be untouched. This is the literal "old output identical"
+    // check, not just "decision is the same".
+    let obs = load("simple.jsonl");
+    let reports = score_all(obs, &ScoreConfig::default());
+    let a = reports.iter().find(|r| r.sample_id == "a").unwrap();
+
+    let new_report_fields = [
+        "gradient_sign_agreement",
+        "update_cosine_mean",
+        "update_direction_agreement",
+        "teacher_residual_stability",
+        "shuffle_seed_sensitivity",
+        "loss_recipe_agreement",
+        "dead_unit_rate",
+        "saturated_unit_rate",
+        "trajectory_effect_mean",
+        "trajectory_effect_sign_agreement",
+    ];
+    let new_component_fields = [
+        "gradient_sign_agreement",
+        "update_direction_agreement",
+        "teacher_residual_stability",
+        "shuffle_seed_robustness",
+        "loss_recipe_agreement",
+    ];
+
+    let json = serde_json::to_string(a).unwrap();
+    for field in new_report_fields {
+        assert!(
+            !json.contains(field),
+            "new field {field} must be fully absent (not even as null) when its underlying \
+             Observation field is absent, got: {json}"
+        );
+    }
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let components = value["components"].as_object().unwrap();
+    for field in new_component_fields {
+        assert!(
+            !components.contains_key(field),
+            "new component {field} must be absent when its weight is 0.0 (default) and its \
+             underlying field is absent"
+        );
+    }
+
+    // Exact pre-existing field values are unchanged: sample "a" is 3 unanimous "win"
+    // observations with tight scores (0.91/0.88/0.90) -> the same stability_score this
+    // fixture has always produced.
+    assert_eq!(a.n_observations, 3);
+    assert_eq!(a.label_agreement, Some(1.0));
+    assert!((a.score_mean.unwrap() - 0.8966666666666666).abs() < 1e-9);
+    assert_eq!(a.decision, Decision::Keep);
+}
+
+#[test]
+fn test_validate_rejects_non_finite_trajectory_fields() {
+    let bad = Observation {
+        sample_id: "a".into(),
+        gradient_sign: Some(f64::NAN),
+        ..Default::default()
+    };
+    let err = bad.validate(7).unwrap_err().to_string();
+    assert!(err.contains("gradient_sign"), "{err}");
+    assert!(err.contains('7'), "{err}");
+
+    let bad_effect = Observation {
+        sample_id: "a".into(),
+        trajectory_effect: Some(f64::INFINITY),
+        ..Default::default()
+    };
+    assert!(bad_effect.validate(1).is_err());
 }

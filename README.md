@@ -212,6 +212,30 @@ another quietset command, use the default `jsonl`, not `csv`.
 All fields except `sample_id` are optional. `gold_label` provides the known-correct label for
 a sample; when present, the `reliability` command uses it as ground truth instead of majority vote.
 
+### Trajectory stability fields (optional)
+
+10 additional optional fields let a training harness feed precomputed per-run trajectory
+signals into quietset for `block-score`/`trajectory-audit` and the `score` components below —
+quietset only ever aggregates these numbers; it never reads a checkpoint or computes a gradient
+itself:
+
+```json
+{"sample_id":"p1","block_id":"B5","seed":1,"shuffle_seed":1,"model_id":"ckpt143","loss_recipe":"recipe_a","layer_id":"ft","gradient_sign":0.3,"update_cosine":0.8,"teacher_residual":0.02,"trajectory_effect":-0.4,"dead_unit_count":0,"saturated_unit_count":0}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `shuffle_seed` | Second seed axis (data-order/shuffle), distinct from `seed` (init seed) |
+| `loss_recipe` | Loss-function/training-recipe variant — same role as `model_id`/`evaluator_id` |
+| `block_id` | Groups this sample into a training block (e.g. a 32-position block), distinct from `sample_id` |
+| `layer_id` | Generic layer identifier for `dead_unit_count`/`saturated_unit_count` — quietset assigns no meaning to specific values (e.g. `"ft"`, `"l2"` are just strings you choose) |
+| `gradient_sign` | Signed per-run scalar; only its sign is used |
+| `update_cosine` | Per-run cosine similarity of this update to a reference direction |
+| `teacher_residual` | Per-run signed scalar (e.g. model output minus teacher output) |
+| `trajectory_effect` | Signed per-run scalar driving block growth/shrink classification (e.g. a radial-norm delta); positive = growth, negative = shrink |
+| `dead_unit_count` | Count of newly-dead units in `layer_id` for this (sample, run) |
+| `saturated_unit_count` | Count of newly-saturated units in `layer_id` for this (sample, run) |
+
 ## Output JSONL format
 
 Key fields in the output (optional fields are omitted when not computable):
@@ -271,6 +295,11 @@ It is the **weighted mean** of available sub-scores (all in `[0.0, 1.0]`):
 | `model_agreement` | label agreement across models |
 | `evaluator_agreement` | label agreement across evaluators |
 | `score_sign_agreement` | fraction of numeric scores sharing the majority sign — weight defaults to `0` (excluded); opt in with `--weight-score-sign` (`--profile game-ai` enables it at `×2` by default) |
+| `gradient_sign_agreement` | fraction of `gradient_sign` observations sharing the majority sign — weight defaults to `0`; opt in with `--weight-gradient-sign` |
+| `update_direction_agreement` | fraction of `update_cosine` observations sharing the majority sign — weight defaults to `0`; opt in with `--weight-update-cosine` |
+| `teacher_residual_stability` | `1 - normalized_std(teacher_residual)` — weight defaults to `0`; opt in with `--weight-teacher-residual` |
+| shuffle-seed robustness | `1 - shuffle_seed_sensitivity` — weight defaults to `0`; opt in with `--weight-shuffle-seed` |
+| `loss_recipe_agreement` | label agreement across `loss_recipe` values — weight defaults to `0`; opt in with `--weight-loss-recipe` |
 
 Missing dimensions (e.g. no labels, no budgets) are excluded from the mean.
 Single observations receive `stability_score = 0.5` (review by default).
@@ -288,6 +317,9 @@ Additional diagnostic fields on `StabilityReport`:
 | `budget_slope` | Score trend as budget increases (positive = converges upward) |
 | `confidence` | `n / (n + k)` — how much to trust the score given evidence count |
 | `adjusted_stability_score` | `stability * confidence + 0.5 * (1 - confidence)` |
+| `update_cosine_mean` | Mean of `update_cosine` across observations. Diagnostic only, not a `stability_score` component. |
+| `dead_unit_rate` / `saturated_unit_rate` | Fraction of observations where `dead_unit_count`/`saturated_unit_count` is `> 0.0` — how often this sample induces new dead/saturated units. Diagnostic only; feeds `block-score`'s pathological classification, not `stability_score`. |
+| `trajectory_effect_mean` / `trajectory_effect_sign_agreement` | Mean and sign-agreement of `trajectory_effect`. Diagnostic only; feeds `block-score`'s growth/shrink classification, not `stability_score`. |
 
 ### Components field
 

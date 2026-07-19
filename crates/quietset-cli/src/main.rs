@@ -215,6 +215,31 @@ struct ScoreArgs {
     #[arg(long)]
     weight_score_sign: Option<f64>,
 
+    /// Weight for gradient_sign_agreement in stability_score (0 = exclude, default —
+    /// informational only unless explicitly weighted).
+    #[arg(long)]
+    weight_gradient_sign: Option<f64>,
+
+    /// Weight for update_direction_agreement in stability_score (0 = exclude, default —
+    /// informational only unless explicitly weighted).
+    #[arg(long)]
+    weight_update_cosine: Option<f64>,
+
+    /// Weight for teacher_residual_stability in stability_score (0 = exclude, default —
+    /// informational only unless explicitly weighted).
+    #[arg(long)]
+    weight_teacher_residual: Option<f64>,
+
+    /// Weight for shuffle-seed stability (1 - shuffle_seed_sensitivity) in stability_score
+    /// (0 = exclude, default — informational only unless explicitly weighted).
+    #[arg(long)]
+    weight_shuffle_seed: Option<f64>,
+
+    /// Weight for loss_recipe_agreement in stability_score (0 = exclude, default —
+    /// informational only unless explicitly weighted).
+    #[arg(long)]
+    weight_loss_recipe: Option<f64>,
+
     /// Apply a use-case preset. Explicit --weight-* and --decision-score flags override the preset.
     #[arg(long, value_enum)]
     profile: Option<ProfileArg>,
@@ -947,6 +972,19 @@ fn run_score(args: ScoreArgs) -> Result<()> {
                 .weight_evaluators
                 .unwrap_or(base_weights.evaluator_agreement),
             score_sign: args.weight_score_sign.unwrap_or(base_weights.score_sign),
+            gradient_sign: args
+                .weight_gradient_sign
+                .unwrap_or(base_weights.gradient_sign),
+            update_cosine: args
+                .weight_update_cosine
+                .unwrap_or(base_weights.update_cosine),
+            teacher_residual: args
+                .weight_teacher_residual
+                .unwrap_or(base_weights.teacher_residual),
+            shuffle_seed: args
+                .weight_shuffle_seed
+                .unwrap_or(base_weights.shuffle_seed),
+            loss_recipe: args.weight_loss_recipe.unwrap_or(base_weights.loss_recipe),
         },
         confidence_k: args.confidence_k,
         min_requirements: MinRequirements {

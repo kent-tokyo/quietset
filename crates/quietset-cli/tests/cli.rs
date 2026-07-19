@@ -682,3 +682,29 @@ fn stable_wrong_risk_breakdown_computes_real_evaluator_rate() {
     assert_eq!(by_evaluator[0]["n_stable_wrong"], 1);
     assert!((by_evaluator[0]["stable_wrong_rate"].as_f64().unwrap() - 0.5).abs() < 1e-9);
 }
+
+// Regression guard for the trajectory-stability feature set: `score --output-format csv` is a
+// hand-written fixed-column writer that was never updated to include the 5 new components, so
+// its header must be byte-for-byte identical to what it was before this feature existed. If a
+// future change adds trajectory columns to CSV, this test should be updated deliberately, not
+// silently pass with an unexpectedly wider header.
+#[test]
+fn score_csv_header_is_unchanged_by_trajectory_stability_fields() {
+    let out = run(&[
+        "score",
+        "../../tests/fixtures/simple.jsonl",
+        "--output-format",
+        "csv",
+    ]);
+    assert!(out.status.success());
+    let header = stdout(&out).lines().next().unwrap().to_string();
+    assert_eq!(
+        header,
+        "sample_id,n_observations,majority_label,label_agreement,label_agreement_lcb,\
+         label_margin,label_entropy,score_mean,score_std,score_range,score_mad,score_iqr,\
+         budget_sensitivity,budget_slope,seed_sensitivity,model_agreement,evaluator_agreement,\
+         confidence,adjusted_stability_score,disagreement_score,stability_score,decision,\
+         component_label,component_score_consistency,component_budget_robustness,\
+         component_seed_robustness,component_model_agreement,component_evaluator_agreement"
+    );
+}
