@@ -144,6 +144,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `calibrate` | 観測 JSONL | 精度目標を満たす keep 閾値を自動探索 |
 | `policy` | 観測 JSONL | keep_threshold を掃引し precision/coverage のトレードオフ表を表示 |
 | `active-review` | scored JSONL | 再評価の緊急度（低LCB・高エントロピー・分散・感度）でサンプルを順位付け |
+| `block-score` | 観測 JSONL | `block_id` でグループ化し、ブロック単位の軌道安定性を分類 |
 
 ## 出力フォーマット
 
@@ -156,6 +157,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `select` | JSONL（パススルー） | なし | 元の入力行をそのまま出力 |
 | `reliability` | JSONL | なし | 評価者ごとに1オブジェクト＋末尾にkappa/alphaの行（任意） |
 | `active-review` | JSONL | なし | 順位付けされたサンプルごとに1オブジェクト |
+| `block-score` | JSONL | なし | ブロックごとに1オブジェクト |
 | `recommend` | JSONL | `--text` | JSONLがデフォルトでtextが例外という唯一のコマンド |
 | `stable-wrong-risk` | 単一のpretty JSONオブジェクト | なし | |
 | `calibrate` | 単一のpretty JSONオブジェクト | `--output-format json\|csv` | `csv`はヘッダー行1つ＋データ行1つ |
@@ -825,6 +827,45 @@ quietset active-review scored.jsonl --observations input.jsonl
 - `request_gold_label` → target field なし（サイジングする対象がないため）
 
 `--observations` を渡さない場合はすべて省略され、observation ファイルに該当する生の値が存在しない場合もサンプルごとに省略される — 捏造した既定値になることはない。
+
+## block-score コマンド
+
+観測を`sample_id`ではなく`block_id`（例: 32局面の学習ブロック）でグループ化し、各ブロックの軌道安定性を分類します:
+
+```bash
+quietset block-score observations.jsonl
+```
+
+```json
+{"block_id":"B5","n_samples":2,"n_observations":4,"seed_effect_consistency":1.0,"shuffle_direction_consistency":1.0,"checkpoint_reproducibility":1.0,"block_stability":1.0,"trajectory_effect_mean":-0.45,"dead_unit_rate":0.5,"classification":"stable_shrink"}
+```
+
+`block_stability = seed_effect_consistency × shuffle_direction_consistency ×
+checkpoint_reproducibility` — 計算可能な因子（それぞれ対応する軸`seed`/`shuffle_seed`/`model_id`で2つ以上の異なるグループが必要）の積です。`classification`は以下のいずれかです:
+
+| クラス | 意味 |
+|-------|------|
+| `stable_growth` | `block_stability >= --stable-threshold` かつ `trajectory_effect_mean`の正味が正 |
+| `stable_shrink` | `block_stability >= --stable-threshold` かつ `trajectory_effect_mean`の正味が負 |
+| `seed_sensitive` | 不安定で、`seed_effect_consistency`が閾値未満の因子の中で最も低い |
+| `order_sensitive` | 不安定で、`shuffle_direction_consistency`が閾値未満の因子の中で最も低い |
+| `trajectory_sensitive` | 不安定で、`checkpoint_reproducibility`が閾値未満の因子の中で最も低い |
+| `pathological` | `dead_unit_rate`/`saturated_unit_rate`が`--pathological-dead-rate`を超える — 他のすべての信号より優先される |
+| `insufficient` | 条件軸の多様性が不足している（または成長/縮小の符号を読み取る`trajectory_effect`が無い） |
+
+**`stable_growth`/`stable_shrink`は「善」「悪」のラベルではありません** — これらは`trajectory_effect`の符号の再現性を表すものであり、その効果が望ましいかどうかを表すものではありません。成長が常に改善とは限らず、縮小が常に悪化とは限りません（dead/saturatedユニット率の上昇を伴う縮小は別途`pathological`として捕捉されますが、健全な縮小は健全な正則化かもしれません）。自身のheld-out/downstream検証が完了するまでの推奨運用は以下の通りです:
+
+| クラス | 推奨される処理 |
+|-------|---------------|
+| `pathological` | 学習から除外 |
+| `insufficient` | 判断前に追加観測を収集 |
+| `seed_sensitive` | seedを追加して再分類 |
+| `order_sensitive` | shuffle seedを追加して再分類 |
+| `trajectory_sensitive` | 別のcheckpointで再評価 |
+| `stable_growth` | downstream検証へ送る——自動keepしない |
+| `stable_shrink` | downstream検証へ送る——自動除外しない |
+
+`--stable-threshold`（デフォルト`0.85`）、`--sensitivity-threshold`（デフォルト`0.5`）、`--pathological-dead-rate`（デフォルト`0.5`）が分類を調整します。`score`の`--keep-threshold`/`--drop-threshold`と同じく「運用上のデフォルト値であり、導出された定数ではない」という位置づけです——**何かのキャリブレーションされた確率ではありません**（特に、対局の棋力向上に対するキャリブレーションされた確率ではありません）。無人でこの分類に学習データの選別を任せる前に、自分自身のheld-outデータと対局結果で検証してください。3つの一貫性因子がなぜ平均ではなく積になっているかは[docs/metrics.md](docs/metrics.md)を参照してください。`block_id`を持つ観測が1つもない場合はstderrに警告を出します（エラーにはなりません）。
 
 ## Rust API
 

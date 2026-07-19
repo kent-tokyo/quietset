@@ -169,6 +169,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `calibrate` | observation JSONL | Find keep_threshold meeting a precision/coverage target |
 | `policy` | observation JSONL | Sweep keep_threshold and show the precision/coverage trade-off table |
 | `active-review` | scored JSONL | Rank samples by re-evaluation urgency (low LCB, high entropy, dispersion, sensitivity) |
+| `block-score` | observation JSONL | Group by `block_id` and classify block-level trajectory stability |
 
 ## Output formats
 
@@ -184,6 +185,7 @@ what to expect from each command before scripting against it:
 | `select` | JSONL (pass-through) | none | Always echoes original input lines unchanged |
 | `reliability` | JSONL | none | One object per evaluator, plus an optional trailing kappa/alpha line |
 | `active-review` | JSONL | none | One object per ranked sample |
+| `block-score` | JSONL | none | One object per block |
 | `recommend` | JSONL | `--text` | Only command where JSONL is the default and text is the opt-in |
 | `stable-wrong-risk` | single pretty JSON object | none | |
 | `calibrate` | single pretty JSON object | `--output-format json\|csv` | `csv` is a single header row + one data row |
@@ -1035,6 +1037,59 @@ Only the field matching `suggested_action` is populated, from that sample's own 
 
 All four fields are omitted without `--observations`, and omitted per-sample whenever the
 relevant raw value is missing from the observations file — never a fabricated default.
+
+## block-score command
+
+Groups observations by `block_id` (e.g. a 32-position training block) instead of `sample_id`
+and classifies each block's trajectory stability:
+
+```bash
+quietset block-score observations.jsonl
+```
+
+```json
+{"block_id":"B5","n_samples":2,"n_observations":4,"seed_effect_consistency":1.0,"shuffle_direction_consistency":1.0,"checkpoint_reproducibility":1.0,"block_stability":1.0,"trajectory_effect_mean":-0.45,"dead_unit_rate":0.5,"classification":"stable_shrink"}
+```
+
+`block_stability = seed_effect_consistency × shuffle_direction_consistency ×
+checkpoint_reproducibility` — the product of whichever of those three factors are computable
+(each requires ≥2 distinct groups on its axis: `seed`, `shuffle_seed`, `model_id`
+respectively). `classification` is one of:
+
+| Class | Meaning |
+|-------|---------|
+| `stable_growth` | `block_stability >= --stable-threshold` and net `trajectory_effect_mean > 0` |
+| `stable_shrink` | `block_stability >= --stable-threshold` and net `trajectory_effect_mean < 0` |
+| `seed_sensitive` | Unstable, and `seed_effect_consistency` is the lowest sub-threshold factor |
+| `order_sensitive` | Unstable, and `shuffle_direction_consistency` is the lowest sub-threshold factor |
+| `trajectory_sensitive` | Unstable, and `checkpoint_reproducibility` is the lowest sub-threshold factor |
+| `pathological` | `dead_unit_rate`/`saturated_unit_rate` exceeds `--pathological-dead-rate` — overrides every other signal |
+| `insufficient` | Not enough condition-axis diversity (or no `trajectory_effect` to read a growth/shrink sign from) |
+
+**`stable_growth`/`stable_shrink` are not "good"/"bad" labels** — they describe reproducibility
+of `trajectory_effect`'s sign, not whether that effect is desirable. Growth is not always an
+improvement; shrink is not always a regression (a shrink with rising dead/saturated-unit rates
+is caught separately by `pathological`, but a clean shrink could be healthy regularization).
+Recommended handling, pending your own held-out/downstream validation:
+
+| Class | Suggested handling |
+|-------|---------------------|
+| `pathological` | Exclude from training |
+| `insufficient` | Collect more observations before deciding |
+| `seed_sensitive` | Add another seed and re-classify |
+| `order_sensitive` | Add another shuffle seed and re-classify |
+| `trajectory_sensitive` | Re-evaluate at another checkpoint |
+| `stable_growth` | Send to downstream validation — do not auto-keep |
+| `stable_shrink` | Send to downstream validation — do not auto-drop |
+
+`--stable-threshold` (default `0.85`), `--sensitivity-threshold` (default `0.5`), and
+`--pathological-dead-rate` (default `0.5`) tune the classification, same "operational default,
+not a derived constant" status as `score`'s `--keep-threshold`/`--drop-threshold` — **not a
+calibrated probability of anything** (in particular, not of a downstream playing-strength
+improvement); validate against your own held-out data and match results before trusting it to
+gate training data unattended. See [docs/metrics.md](docs/metrics.md) for why the three
+consistency factors are multiplied rather than averaged. Warns on stderr (doesn't error) if no
+observation carries `block_id`.
 
 ## Rust API
 

@@ -8,12 +8,12 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use quietset::{
-    ActiveReviewCosts, ActiveReviewWeights, Decision, DecisionScore, LatentTruthSafety,
-    MinRequirements, Observation, RankBy, ScoreConfig, ScoreDispersion, ScoreWeights,
-    StabilityReport, Thresholds, action_target_fields, compute_calibration,
+    ActiveReviewCosts, ActiveReviewWeights, BlockThresholds, Decision, DecisionScore,
+    LatentTruthSafety, MinRequirements, Observation, RankBy, ScoreConfig, ScoreDispersion,
+    ScoreWeights, StabilityReport, Thresholds, action_target_fields, compute_calibration,
     compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv,
-    parse_jsonl, rank_active_review, score_all, score_all_gold_weighted, score_all_latent_truth,
-    score_all_weighted, select_within_budget,
+    parse_jsonl, rank_active_review, score_all, score_all_blocks, score_all_gold_weighted,
+    score_all_latent_truth, score_all_weighted, select_within_budget,
 };
 
 #[derive(Parser)]
@@ -55,6 +55,8 @@ enum Commands {
     Policy(PolicyArgs),
     /// Rank scored samples by re-evaluation urgency
     ActiveReview(ActiveReviewArgs),
+    /// Group observations by block_id and compute block-level trajectory stability
+    BlockScore(BlockScoreArgs),
 }
 
 #[derive(ValueEnum, Clone)]
@@ -381,6 +383,31 @@ struct FilterArgs {
     /// Keep only records with score_iqr <= this value.
     #[arg(long)]
     max_score_iqr: Option<f64>,
+}
+
+#[derive(clap::Args)]
+struct BlockScoreArgs {
+    /// Input observation JSONL file (not scored), with block_id set. Use '-' for stdin.
+    #[arg(default_value = "-")]
+    input: String,
+
+    /// Skip malformed lines instead of exiting with an error.
+    #[arg(long)]
+    skip_invalid: bool,
+
+    /// block_stability at or above this is "stable" (growth/shrink decided by
+    /// trajectory_effect's sign).
+    #[arg(long, default_value_t = 0.85)]
+    stable_threshold: f64,
+
+    /// A consistency factor (seed/shuffle/checkpoint) below this is "the problem" driving an
+    /// unstable block's classification.
+    #[arg(long, default_value_t = 0.5)]
+    sensitivity_threshold: f64,
+
+    /// dead_unit_rate/saturated_unit_rate above this overrides every other signal.
+    #[arg(long, default_value_t = 0.5)]
+    pathological_dead_rate: f64,
 }
 
 #[derive(clap::Args)]
@@ -881,6 +908,7 @@ fn main() -> Result<()> {
         Commands::Calibrate(args) => run_calibrate(args),
         Commands::Policy(args) => run_policy(args),
         Commands::ActiveReview(args) => run_active_review(args),
+        Commands::BlockScore(args) => run_block_score(args),
     }
 }
 
@@ -2456,6 +2484,27 @@ fn run_reliability(args: ReliabilityArgs) -> Result<()> {
             summary.insert("krippendorff_alpha".into(), serde_json::json!(a));
         }
         println!("{}", serde_json::to_string(&summary)?);
+    }
+    Ok(())
+}
+
+fn run_block_score(args: BlockScoreArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let observations = read_observations_jsonl(&raw, args.skip_invalid)?;
+    if observations.is_empty() {
+        anyhow::bail!("no observations found");
+    }
+    let thresholds = BlockThresholds {
+        stable: args.stable_threshold,
+        sensitivity: args.sensitivity_threshold,
+        pathological_dead_rate: args.pathological_dead_rate,
+    };
+    let reports = score_all_blocks(observations, &thresholds);
+    if reports.is_empty() {
+        eprintln!("warning: no observation carried block_id; nothing to report");
+    }
+    for report in &reports {
+        println!("{}", serde_json::to_string(report)?);
     }
     Ok(())
 }

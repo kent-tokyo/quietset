@@ -683,6 +683,32 @@ fn stable_wrong_risk_breakdown_computes_real_evaluator_rate() {
     assert!((by_evaluator[0]["stable_wrong_rate"].as_f64().unwrap() - 0.5).abs() < 1e-9);
 }
 
+#[test]
+fn block_score_classifies_a_stable_growth_block() {
+    let path = write_temp(
+        "block_score_growth.jsonl",
+        "{\"sample_id\":\"p1\",\"block_id\":\"B1\",\"seed\":1,\"model_id\":\"ckpt1\",\"trajectory_effect\":0.3,\"update_cosine\":0.9}\n\
+         {\"sample_id\":\"p1\",\"block_id\":\"B1\",\"seed\":2,\"model_id\":\"ckpt2\",\"trajectory_effect\":0.4,\"update_cosine\":0.8}\n",
+    );
+    let out = run(&["block-score", path.to_str().unwrap()]);
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(value["block_id"], "B1");
+    assert_eq!(value["classification"], "stable_growth");
+}
+
+#[test]
+fn block_score_warns_when_no_block_id_present() {
+    let path = write_temp(
+        "block_score_no_block.jsonl",
+        "{\"sample_id\":\"p1\",\"score\":0.9}\n",
+    );
+    let out = run(&["block-score", path.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(stdout(&out).trim().is_empty());
+    assert!(stderr(&out).contains("no observation carried block_id"));
+}
+
 // Regression guard for the trajectory-stability feature set: `score --output-format csv` is a
 // hand-written fixed-column writer that was never updated to include the 5 new components, so
 // its header must be byte-for-byte identical to what it was before this feature existed. If a

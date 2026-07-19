@@ -15,6 +15,7 @@
 
 pub mod active_review;
 pub mod agreement;
+pub mod block;
 pub mod calibration;
 pub mod config;
 pub mod decision;
@@ -33,6 +34,9 @@ pub use active_review::{
     action_target_fields, rank_active_review, select_within_budget,
 };
 pub use agreement::{compute_fleiss_kappa, compute_krippendorff_alpha};
+pub use block::{
+    BlockClass, BlockStabilityReport, BlockThresholds, compute_block_report, score_all_blocks,
+};
 pub use calibration::{CalibrationResult, compute_calibration};
 pub use config::{
     DecisionScore, LatentTruthSafety, MinRequirements, ScoreConfig, ScoreDispersion, ScoreWeights,

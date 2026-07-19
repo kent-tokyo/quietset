@@ -209,6 +209,54 @@ but keep the formula/assumptions/failure-mode depth here, not duplicated there.
 - **quietset usage**: `block-score`/`trajectory-audit` (see below); no `ScoreWeights` field
   exists for these — they never enter `stability_score`.
 
+## block_stability and BlockClass classification
+
+- **Formula**: `block_stability = seed_effect_consistency × shuffle_direction_consistency ×
+  checkpoint_reproducibility` — the product of whichever of those three
+  cross-group-sign-agreement factors are computable (each needs ≥2 distinct groups on its
+  axis). Classification is a first-match-wins decision tree: a pathological dead/saturated rate
+  overrides everything; else `block_stability >= stable_threshold` with a signed
+  `trajectory_effect_mean` gives growth/shrink; else the lowest sub-`sensitivity_threshold`
+  factor (fixed tie-break order seed → shuffle → checkpoint) names the cause
+  (`crates/quietset/src/block.rs`).
+- **Provenance**: none — a quietset-specific composite, the block-level analogue of
+  `stability_score`. **Not a calibrated probability of anything** — in particular, not a
+  calibrated probability of a downstream playing-strength improvement. The three terms are
+  multiplied, not averaged, because block stability is treated as requiring *all three* forms
+  of reproducibility — a high value on one axis should not be able to compensate for
+  instability on another (see the code comment at the multiplication site in
+  `compute_block_report`). This is a design choice, not a derivation: it makes the score
+  strongly punish a single weak dimension, which is the intended behavior, but it is not a
+  statistically fitted or cross-validated model of anything.
+- **Interpretation**: whether a training block's effect is consistent across seed/shuffle/
+  checkpoint condition axes, and if not, which axis is most responsible.
+- **Assumptions/failure modes**: a block can be classified `insufficient` even when every
+  individual consistency factor is above `sensitivity_threshold`, if their *product* still
+  undercuts `stable_threshold` — this is reported honestly rather than guessing which axis is
+  "the" cause (see the doc comment on `block::classify`). `stable_threshold` (`0.85`),
+  `sensitivity_threshold` (`0.5`), and `pathological_dead_rate` (`0.5`) are operational
+  defaults, not universal constants, same status as `score`'s `0.85`/`0.40` — validate them (and
+  the classification as a whole) against your own held-out data and, for a game engine, actual
+  match results, before trusting it to gate training data unattended.
+- **`StableGrowth`/`StableShrink` are not "good"/"bad" labels.** They describe *reproducibility*
+  of `trajectory_effect`'s sign, not whether that effect is desirable — growth is not always an
+  improvement, and shrink is not always a regression (a shrink with rising
+  `dead_unit_rate`/`saturated_unit_rate` is caught separately by `Pathological`, but a clean
+  shrink could be healthy regularization). Recommended handling per class, pending outcome
+  validation rather than automatic action on the label alone:
+
+  | Class | Suggested handling |
+  |-------|---------------------|
+  | `pathological` | Exclude from training |
+  | `insufficient` | Collect more observations before deciding |
+  | `seed_sensitive` | Add another seed and re-classify |
+  | `order_sensitive` | Add another shuffle seed and re-classify |
+  | `trajectory_sensitive` | Re-evaluate at another checkpoint |
+  | `stable_growth` | Send to downstream validation — do not auto-keep |
+  | `stable_shrink` | Send to downstream validation — do not auto-drop |
+
+- **quietset usage**: `block-score` and `trajectory-audit` commands.
+
 ## keep / drop thresholds (0.85 / 0.40)
 
 - **Formula**: none — `Thresholds::default()` (`crates/quietset/src/decision.rs:11-18`).

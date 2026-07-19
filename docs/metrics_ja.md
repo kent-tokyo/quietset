@@ -104,6 +104,26 @@ quietset が出力するすべての数値について、数式・出典・解�
 - **解釈**: あるサンプルがどれだけ頻繁に新規のdead/saturatedユニットを誘発するか、また正味の学習効果（例: radial normの変化量）が成長方向か縮小方向か。これらは`block-score`の分類（pathologicalの上書き、成長/縮小の符号）に使われ、サンプル単位の安定性には使われない。
 - **quietset での使い方**: `block-score`/`trajectory-audit`（下記参照）。これらに対応する`ScoreWeights`フィールドは存在せず、`stability_score`には一切入らない。
 
+## block_stability と BlockClass 分類
+
+- **数式**: `block_stability = seed_effect_consistency × shuffle_direction_consistency × checkpoint_reproducibility` — 計算可能な3つのcross-group符号一致度因子の積（それぞれ対応する軸で2つ以上の異なるグループが必要）。分類はfirst-match-winsの決定木: pathologicalなdead/saturated率がすべてを上書き、そうでなく`block_stability >= stable_threshold`で符号付き`trajectory_effect_mean`があれば成長/縮小、それ以外は`sensitivity_threshold`未満の因子のうち最も低いもの（固定のタイブレーク順: seed → shuffle → checkpoint）が原因として示される（`crates/quietset/src/block.rs`）。
+- **出典**: なし — quietset独自の複合指標。`stability_score`のブロック版に相当する。**何かのキャリブレーションされた確率ではない**——特に、対局の棋力向上に対するキャリブレーションされた確率ではない。3つの項を平均ではなく積にしているのは、ブロックの安定性には*3つすべての*再現性が必要であり、1つの軸で高い値が出ても別の軸の不安定さを相殺すべきではないという設計判断による（`compute_block_report`内の乗算箇所のコードコメント参照）。これは導出ではなく設計判断であり、単一の弱い次元を強く罰するという意図した挙動を実現するが、統計的にフィットしたり交差検証されたりしたモデルではない。
+- **解釈**: 学習ブロックの効果がseed/shuffle/checkpointの条件軸間で一貫しているか、一貫していない場合はどの軸が最も原因であるか。
+- **前提/failure mode**: 個々の一貫性因子がすべて`sensitivity_threshold`を上回っていても、その*積*が`stable_threshold`を下回れば`insufficient`に分類され得る——これはどの軸が「原因」かを推測するのではなく、正直にそう報告する設計（`block::classify`のドキュメントコメント参照）。`stable_threshold`（`0.85`）、`sensitivity_threshold`（`0.5`）、`pathological_dead_rate`（`0.5`）は運用上のデフォルト値であり、普遍的な定数ではない——`score`の`0.85`/`0.40`と同じ位置づけ。無人でこの分類に学習データの選別を任せる前に、自分自身のheld-outデータと、対局を伴うエンジンであれば実際の対局結果で検証すること。
+- **`stable_growth`/`stable_shrink`は「善」「悪」のラベルではない。** これらは`trajectory_effect`の符号の*再現性*を表すものであり、その効果が望ましいかどうかを表すものではない——成長が常に改善とは限らず、縮小が常に悪化とは限らない（`dead_unit_rate`/`saturated_unit_rate`の上昇を伴う縮小は別途`pathological`として捕捉されるが、ユニットの健全性がクリーンな縮小は健全な正則化かもしれない）。結果検証が完了するまでの、ラベルだけによる自動処理ではない推奨運用は以下の通り:
+
+  | クラス | 推奨される処理 |
+  |-------|---------------|
+  | `pathological` | 学習から除外 |
+  | `insufficient` | 判断前に追加観測を収集 |
+  | `seed_sensitive` | seedを追加して再分類 |
+  | `order_sensitive` | shuffle seedを追加して再分類 |
+  | `trajectory_sensitive` | 別のcheckpointで再評価 |
+  | `stable_growth` | downstream検証へ送る——自動keepしない |
+  | `stable_shrink` | downstream検証へ送る——自動除外しない |
+
+- **quietset での使い方**: `block-score`および`trajectory-audit`コマンド。
+
 ## keep / drop 閾値（0.85 / 0.40）
 
 - **数式**: なし — `Thresholds::default()`（`crates/quietset/src/decision.rs:11-18`）。
