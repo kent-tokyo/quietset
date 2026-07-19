@@ -27,6 +27,7 @@ pub mod schema;
 pub mod scoring;
 pub mod stable_wrong;
 pub mod stream;
+pub mod trajectory_audit;
 pub mod weighting;
 
 pub use active_review::{
@@ -52,6 +53,7 @@ pub use stable_wrong::{
     stable_wrong_breakdown,
 };
 pub use stream::StreamingScorer;
+pub use trajectory_audit::{TrajectoryAuditEntry, compute_trajectory_audit, group_size_mismatches};
 pub use weighting::{
     compute_evaluator_label_weights, compute_evaluator_reliability, compute_evaluator_weights,
     compute_weighted_majority, compute_weighted_majority_by_label,

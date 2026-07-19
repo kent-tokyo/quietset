@@ -11,9 +11,10 @@ use quietset::{
     ActiveReviewCosts, ActiveReviewWeights, BlockThresholds, Decision, DecisionScore,
     LatentTruthSafety, MinRequirements, Observation, RankBy, ScoreConfig, ScoreDispersion,
     ScoreWeights, StabilityReport, Thresholds, action_target_fields, compute_calibration,
-    compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha, parse_csv,
-    parse_jsonl, rank_active_review, score_all, score_all_blocks, score_all_gold_weighted,
-    score_all_latent_truth, score_all_weighted, select_within_budget,
+    compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha,
+    compute_trajectory_audit, group_size_mismatches, parse_csv, parse_jsonl, rank_active_review,
+    score_all, score_all_blocks, score_all_gold_weighted, score_all_latent_truth,
+    score_all_weighted, select_within_budget,
 };
 
 #[derive(Parser)]
@@ -57,6 +58,8 @@ enum Commands {
     ActiveReview(ActiveReviewArgs),
     /// Group observations by block_id and compute block-level trajectory stability
     BlockScore(BlockScoreArgs),
+    /// Diff block-level trajectory stability between a before/after observation file
+    TrajectoryAudit(TrajectoryAuditArgs),
 }
 
 #[derive(ValueEnum, Clone)]
@@ -402,6 +405,43 @@ struct BlockScoreArgs {
 
     /// A consistency factor (seed/shuffle/checkpoint) below this is "the problem" driving an
     /// unstable block's classification.
+    #[arg(long, default_value_t = 0.5)]
+    sensitivity_threshold: f64,
+
+    /// dead_unit_rate/saturated_unit_rate above this overrides every other signal.
+    #[arg(long, default_value_t = 0.5)]
+    pathological_dead_rate: f64,
+}
+
+#[derive(clap::Args)]
+struct TrajectoryAuditArgs {
+    /// Observation JSONL file from the earlier checkpoint. Not stdin-capable — --after
+    /// already claims the other input slot.
+    #[arg(long)]
+    before: String,
+
+    /// Observation JSONL file from the later checkpoint.
+    #[arg(long)]
+    after: String,
+
+    /// Expected distinct sample_id count per block_id (e.g. 32 for 32-position blocks). Warns
+    /// on stderr (not an error) for any block whose actual count differs.
+    #[arg(long)]
+    group_size: Option<usize>,
+
+    /// Skip malformed lines instead of exiting with an error.
+    #[arg(long)]
+    skip_invalid: bool,
+
+    /// Output machine-readable JSON (one object per line) instead of formatted text.
+    #[arg(long)]
+    json: bool,
+
+    /// block_stability at or above this is "stable".
+    #[arg(long, default_value_t = 0.85)]
+    stable_threshold: f64,
+
+    /// A consistency factor below this is "the problem" driving an unstable block's classification.
     #[arg(long, default_value_t = 0.5)]
     sensitivity_threshold: f64,
 
@@ -909,6 +949,7 @@ fn main() -> Result<()> {
         Commands::Policy(args) => run_policy(args),
         Commands::ActiveReview(args) => run_active_review(args),
         Commands::BlockScore(args) => run_block_score(args),
+        Commands::TrajectoryAudit(args) => run_trajectory_audit(args),
     }
 }
 
@@ -2505,6 +2546,63 @@ fn run_block_score(args: BlockScoreArgs) -> Result<()> {
     }
     for report in &reports {
         println!("{}", serde_json::to_string(report)?);
+    }
+    Ok(())
+}
+
+fn run_trajectory_audit(args: TrajectoryAuditArgs) -> Result<()> {
+    let before_raw = read_input(&args.before)?;
+    let after_raw = read_input(&args.after)?;
+    let before = read_observations_jsonl(&before_raw, args.skip_invalid)?;
+    let after = read_observations_jsonl(&after_raw, args.skip_invalid)?;
+    if before.is_empty() || after.is_empty() {
+        anyhow::bail!("no observations found in --before or --after");
+    }
+
+    if let Some(group_size) = args.group_size {
+        for (block_id, actual, expected) in group_size_mismatches(&before, &after, group_size) {
+            eprintln!(
+                "warning: block {block_id} has {actual} distinct samples, expected {expected} (--group-size)"
+            );
+        }
+    }
+
+    let thresholds = BlockThresholds {
+        stable: args.stable_threshold,
+        sensitivity: args.sensitivity_threshold,
+        pathological_dead_rate: args.pathological_dead_rate,
+    };
+    let entries = compute_trajectory_audit(before, after, &thresholds);
+    if entries.is_empty() {
+        eprintln!("warning: no block_id matched between --before and --after; nothing to report");
+    }
+    if args.json {
+        for entry in &entries {
+            println!("{}", serde_json::to_string(entry)?);
+        }
+    } else {
+        for entry in &entries {
+            println!(
+                "{}  {} → {}",
+                entry.block_id, entry.before_classification, entry.after_classification
+            );
+            for (layer, delta) in &entry.dead_unit_delta {
+                if *delta != 0.0 {
+                    println!("  dead_unit_delta[{layer}]:       {delta:+.4}");
+                }
+            }
+            for (layer, delta) in &entry.saturated_unit_delta {
+                if *delta != 0.0 {
+                    println!("  saturated_unit_delta[{layer}]:  {delta:+.4}");
+                }
+            }
+            if let Some(delta) = entry.trajectory_effect_delta {
+                println!("  trajectory_effect_delta:      {delta:+.4}");
+            }
+            if let Some(r) = entry.reproducibility_3seed {
+                println!("  reproducibility_3seed:        {r:.4}");
+            }
+        }
     }
     Ok(())
 }

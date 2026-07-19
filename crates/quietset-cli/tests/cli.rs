@@ -709,6 +709,63 @@ fn block_score_warns_when_no_block_id_present() {
     assert!(stderr(&out).contains("no observation carried block_id"));
 }
 
+#[test]
+fn trajectory_audit_flags_a_destructive_block_like_b5() {
+    let before = write_temp(
+        "trajectory_audit_before.jsonl",
+        "{\"sample_id\":\"p1\",\"block_id\":\"B5\",\"seed\":1,\"layer_id\":\"ft\",\"dead_unit_count\":0,\"trajectory_effect\":-0.1}\n\
+         {\"sample_id\":\"p2\",\"block_id\":\"B5\",\"seed\":2,\"layer_id\":\"ft\",\"dead_unit_count\":0,\"trajectory_effect\":-0.1}\n",
+    );
+    let after = write_temp(
+        "trajectory_audit_after.jsonl",
+        "{\"sample_id\":\"p1\",\"block_id\":\"B5\",\"seed\":1,\"layer_id\":\"ft\",\"dead_unit_count\":6,\"trajectory_effect\":-0.5}\n\
+         {\"sample_id\":\"p2\",\"block_id\":\"B5\",\"seed\":2,\"layer_id\":\"ft\",\"dead_unit_count\":5,\"trajectory_effect\":-0.6}\n",
+    );
+    let out = run(&[
+        "trajectory-audit",
+        "--before",
+        before.to_str().unwrap(),
+        "--after",
+        after.to_str().unwrap(),
+        "--group-size",
+        "32",
+        "--json",
+    ]);
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("expected 32"),
+        "should warn about the 2-sample block not matching --group-size 32: {}",
+        stderr(&out)
+    );
+    let value: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(value["block_id"], "B5");
+    assert_eq!(value["before_classification"], "stable_shrink");
+    assert_eq!(value["after_classification"], "pathological");
+    assert_eq!(value["dead_unit_delta"]["ft"], 1.0);
+}
+
+#[test]
+fn trajectory_audit_reports_nothing_when_no_blocks_match() {
+    let before = write_temp(
+        "trajectory_audit_nomatch_before.jsonl",
+        "{\"sample_id\":\"p1\",\"block_id\":\"B5\"}\n",
+    );
+    let after = write_temp(
+        "trajectory_audit_nomatch_after.jsonl",
+        "{\"sample_id\":\"p1\",\"block_id\":\"B7\"}\n",
+    );
+    let out = run(&[
+        "trajectory-audit",
+        "--before",
+        before.to_str().unwrap(),
+        "--after",
+        after.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(stdout(&out).trim().is_empty());
+    assert!(stderr(&out).contains("nothing to report"));
+}
+
 // Regression guard for the trajectory-stability feature set: `score --output-format csv` is a
 // hand-written fixed-column writer that was never updated to include the 5 new components, so
 // its header must be byte-for-byte identical to what it was before this feature existed. If a

@@ -170,6 +170,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `policy` | observation JSONL | Sweep keep_threshold and show the precision/coverage trade-off table |
 | `active-review` | scored JSONL | Rank samples by re-evaluation urgency (low LCB, high entropy, dispersion, sensitivity) |
 | `block-score` | observation JSONL | Group by `block_id` and classify block-level trajectory stability |
+| `trajectory-audit` | 2 observation JSONL | Diff block-level trajectory stability between a before/after checkpoint |
 
 ## Output formats
 
@@ -186,6 +187,7 @@ what to expect from each command before scripting against it:
 | `reliability` | JSONL | none | One object per evaluator, plus an optional trailing kappa/alpha line |
 | `active-review` | JSONL | none | One object per ranked sample |
 | `block-score` | JSONL | none | One object per block |
+| `trajectory-audit` | text | `--json` (JSONL, one object per block) | Sorted most-destructive block first |
 | `recommend` | JSONL | `--text` | Only command where JSONL is the default and text is the opt-in |
 | `stable-wrong-risk` | single pretty JSON object | none | |
 | `calibrate` | single pretty JSON object | `--output-format json\|csv` | `csv` is a single header row + one data row |
@@ -1090,6 +1092,35 @@ improvement); validate against your own held-out data and match results before t
 gate training data unattended. See [docs/metrics.md](docs/metrics.md) for why the three
 consistency factors are multiplied rather than averaged. Warns on stderr (doesn't error) if no
 observation carries `block_id`.
+
+## trajectory-audit command
+
+Diffs block-level trajectory stability between a before/after observation file (e.g. two
+training checkpoints) — the destructive-sample detector:
+
+```bash
+quietset trajectory-audit --before checkpoint_143.jsonl --after checkpoint_176.jsonl --group-size 32
+```
+
+```
+B5  stable_shrink → pathological
+  dead_unit_delta[ft]:       +1.0000
+  trajectory_effect_delta:      -0.4500
+```
+
+Matches blocks by `block_id` (blocks present on only one side are skipped) and reports, per
+matched block: `dead_unit_delta`/`saturated_unit_delta` (per `layer_id`, `after_rate -
+before_rate`; a layer seen on only one side is treated as `0.0` on the other, so a brand-new
+problem layer still shows its full rate as the delta), `trajectory_effect_delta`,
+`before_classification`/`after_classification`, and `reproducibility_3seed`
+(`seed_effect_consistency` on the after side, only when ≥3 distinct `seed` values are present
+there). Sorted by the largest dead/saturated-unit delta magnitude descending — most-destructive
+blocks first. `--json` for machine-readable JSONL output (one object per block).
+
+`--group-size N` warns on stderr for any block whose distinct `sample_id` count doesn't match
+`N` on either side — a malformed block grouping (e.g. a truncated 32-position block), not a
+destructive-training signal. Same `--stable-threshold`/`--sensitivity-threshold`/
+`--pathological-dead-rate` flags as `block-score`.
 
 ## Rust API
 

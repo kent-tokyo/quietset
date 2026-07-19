@@ -145,6 +145,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `policy` | 観測 JSONL | keep_threshold を掃引し precision/coverage のトレードオフ表を表示 |
 | `active-review` | scored JSONL | 再評価の緊急度（低LCB・高エントロピー・分散・感度）でサンプルを順位付け |
 | `block-score` | 観測 JSONL | `block_id` でグループ化し、ブロック単位の軌道安定性を分類 |
+| `trajectory-audit` | 観測 JSONL × 2 | before/after checkpoint 間のブロック単位の軌道安定性を比較 |
 
 ## 出力フォーマット
 
@@ -158,6 +159,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `reliability` | JSONL | なし | 評価者ごとに1オブジェクト＋末尾にkappa/alphaの行（任意） |
 | `active-review` | JSONL | なし | 順位付けされたサンプルごとに1オブジェクト |
 | `block-score` | JSONL | なし | ブロックごとに1オブジェクト |
+| `trajectory-audit` | text | `--json`（JSONL、ブロックごとに1オブジェクト） | 最も破壊的なブロックから順に表示 |
 | `recommend` | JSONL | `--text` | JSONLがデフォルトでtextが例外という唯一のコマンド |
 | `stable-wrong-risk` | 単一のpretty JSONオブジェクト | なし | |
 | `calibrate` | 単一のpretty JSONオブジェクト | `--output-format json\|csv` | `csv`はヘッダー行1つ＋データ行1つ |
@@ -866,6 +868,24 @@ checkpoint_reproducibility` — 計算可能な因子（それぞれ対応する
 | `stable_shrink` | downstream検証へ送る——自動除外しない |
 
 `--stable-threshold`（デフォルト`0.85`）、`--sensitivity-threshold`（デフォルト`0.5`）、`--pathological-dead-rate`（デフォルト`0.5`）が分類を調整します。`score`の`--keep-threshold`/`--drop-threshold`と同じく「運用上のデフォルト値であり、導出された定数ではない」という位置づけです——**何かのキャリブレーションされた確率ではありません**（特に、対局の棋力向上に対するキャリブレーションされた確率ではありません）。無人でこの分類に学習データの選別を任せる前に、自分自身のheld-outデータと対局結果で検証してください。3つの一貫性因子がなぜ平均ではなく積になっているかは[docs/metrics.md](docs/metrics.md)を参照してください。`block_id`を持つ観測が1つもない場合はstderrに警告を出します（エラーにはなりません）。
+
+## trajectory-audit コマンド
+
+before/after の観測ファイル（例: 2つの学習checkpoint）間でブロック単位の軌道安定性を比較します — 破壊的サンプル検出器です:
+
+```bash
+quietset trajectory-audit --before checkpoint_143.jsonl --after checkpoint_176.jsonl --group-size 32
+```
+
+```
+B5  stable_shrink → pathological
+  dead_unit_delta[ft]:       +1.0000
+  trajectory_effect_delta:      -0.4500
+```
+
+`block_id`でブロックを突合し（片側にしか存在しないブロックはスキップ）、突合できた各ブロックについて次を報告します: `dead_unit_delta`/`saturated_unit_delta`（`layer_id`ごとに`after_rate - before_rate`。片側にしか存在しないレイヤーはもう片方を`0.0`として扱うため、新規に問題化したレイヤーもその`after_rate`がそのままdeltaとして表示される）、`trajectory_effect_delta`、`before_classification`/`after_classification`、`reproducibility_3seed`（after側で`seed`が3種類以上存在する場合のみの`seed_effect_consistency`）。dead/saturatedユニットのdelta絶対値が大きいブロックから順にソートされます。`--json`でマシン可読なJSONL出力（ブロックごとに1オブジェクト）。
+
+`--group-size N`は、どちらかの側で`block_id`ごとの distinct `sample_id`数が`N`と一致しないブロックについてstderrに警告します — これは破壊的な学習の兆候ではなく、ブロックのグルーピングが壊れている（例: 32局面ブロックが途中で切れている）ことを示します。`block-score`と同じ`--stable-threshold`/`--sensitivity-threshold`/`--pathological-dead-rate`フラグを持ちます。
 
 ## Rust API
 
