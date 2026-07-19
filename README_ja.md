@@ -53,6 +53,7 @@ quietset audit robust_samples.jsonl --json | jq '.seed_sensitive[:5]'
 
 ```bash
 cargo install quietset-cli
+quietset --version   # アップグレード後、実際に入ったバージョンを確認
 ```
 
 ## CLI の使い方
@@ -170,6 +171,8 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `policy` | textテーブル | `--output-format text\|json\|csv`（旧`--json`は`json`のエイリアスとして引き続き使用可） | `json`はJSONL(閾値ごとに1行)、`csv`は固定列(`gold_label`が無い場合は空セル) | |
 
 **CSVはパイプ用途では行き止まり。** `score --output-format csv`、`calibrate --output-format csv`、`policy --output-format csv`はスプレッドシート/BIツール向けのエクスポート専用。他のどのquietsetコマンドもCSVを読み戻せない（`filter`/`summary`/`explain`/`compare`/`audit`/`select`/`recommend`/`active-review`はいずれもJSONL形式の`StabilityReport`を期待し、`stable-wrong-risk`/`calibrate`/`reliability`/`policy`はJSONL形式の`Observation`を期待する）。`score`の出力を他のquietsetコマンドにパイプする予定があるなら、`csv`ではなくデフォルトの`jsonl`を使うこと。
+
+`score`はスコアリング後、デフォルトで`kept X / Y (Z%), review N, drop M`という要約と、該当する場合は設定に関する警告（[keep 判定の最低観測条件](#keep-判定の最低観測条件)を参照）をstderrに出力する — いずれもstdoutは純粋なデータのままなので、パイプ処理を壊すことはない。スクリプト出力にこれを含めたくない場合は`2>/dev/null`でstderrをリダイレクトすればよい。
 
 ## 入力 JSONL フォーマット
 

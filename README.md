@@ -67,6 +67,7 @@ quietset audit robust_samples.jsonl --json | jq '.seed_sensitive[:5]'
 
 ```bash
 cargo install quietset-cli
+quietset --version   # confirm what's actually installed after an upgrade
 ```
 
 ## CLI examples
@@ -203,6 +204,12 @@ command can parse CSV back in (`filter`/`summary`/`explain`/`compare`/`audit`/`s
 `recommend`/`active-review` all expect JSONL `StabilityReport`s; `stable-wrong-risk`/`calibrate`/
 `reliability`/`policy` expect JSONL `Observation`s). If you plan to pipe `score`'s output into
 another quietset command, use the default `jsonl`, not `csv`.
+
+`score` also prints a `kept X / Y (Z%), review N, drop M` summary to stderr by default after
+scoring, plus a configuration warning if applicable (see
+[Minimum requirements for Keep](#minimum-requirements-for-keep)) — stdout stays pure data either
+way, so this never needs `--skip-invalid`-style opt-in and never breaks piping; redirect stderr
+(`2>/dev/null`) if you don't want it in scripted output.
 
 ## Input JSONL format
 
@@ -395,6 +402,12 @@ quietset score input.jsonl \
   --min-seeds-keep 2 \
   > scored.jsonl
 ```
+
+`score` warns on stderr if a `--min-evaluators-keep` floor (explicit, or via a profile like
+`game-ai`) can never be satisfied by the input — e.g. requiring 2 distinct `evaluator_id`
+values on data that only ever has one. If you're evaluating with one engine at multiple search
+depths rather than multiple engines, use `--profile game-ai-single-engine` instead, which sets
+no min-evaluators floor.
 
 ## Decisions
 
