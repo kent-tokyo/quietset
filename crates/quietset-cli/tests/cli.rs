@@ -19,8 +19,14 @@ fn stderr(out: &Output) -> String {
 }
 
 fn write_temp(name: &str, contents: &str) -> std::path::PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("quietset_cli_test_{name}_{}", std::process::id()));
+    // Callers may reuse the same `name` (e.g. shared fixtures); a counter keeps
+    // every call's path unique so parallel tests never race on one file.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "quietset_cli_test_{name}_{}_{n}",
+        std::process::id()
+    ));
     std::fs::write(&path, contents).unwrap();
     path
 }
