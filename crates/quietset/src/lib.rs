@@ -23,6 +23,7 @@ pub mod error;
 pub mod group;
 pub mod latent_truth;
 pub mod observation;
+pub mod preflight;
 pub mod schema;
 pub mod scoring;
 pub mod stable_wrong;
@@ -39,7 +40,7 @@ pub use agreement::{
 };
 pub use block::{
     BlockClass, BlockStabilityReport, BlockThresholds, LossRecipeIssue, compute_block_report,
-    loss_recipe_issues, score_all_blocks,
+    loss_recipe_comparable, loss_recipe_issues, score_all_blocks,
 };
 pub use calibration::{
     CalibrationOptions, CalibrationResult, GroupKey, GroupLeakage, compute_calibration,
@@ -52,6 +53,10 @@ pub use decision::Thresholds;
 pub use error::{Error, Result};
 pub use latent_truth::{LatentTruthEstimate, compute_latent_truth};
 pub use observation::{Observation, parse_csv, parse_jsonl};
+pub use preflight::{
+    BlockRunIdIssue, CheckpointCorrespondence, FieldCoverage, PreflightReport, PreflightTarget,
+    SeedCoverage, SidePreflight, compute_preflight, required_fields,
+};
 pub use schema::{Decision, StabilityComponents, StabilityReport};
 pub use scoring::{compute_report, score_all};
 pub use stable_wrong::{

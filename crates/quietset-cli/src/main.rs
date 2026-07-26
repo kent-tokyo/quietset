@@ -10,12 +10,13 @@ use std::collections::HashMap;
 use quietset::{
     ActiveReviewCosts, ActiveReviewWeights, BlockThresholds, CalibrationOptions, Decision,
     DecisionScore, GroupKey, LatentTruthSafety, LossRecipeIssue, MinRequirements, Observation,
-    RankBy, ScoreConfig, ScoreDispersion, ScoreWeights, StabilityReport, Thresholds,
-    action_target_fields, compute_calibration_with_options, compute_evaluator_reliability,
-    compute_fleiss_kappa, compute_krippendorff_alpha, compute_spearman_rank_correlation,
-    compute_trajectory_audit, group_size_mismatches, loss_recipe_issues, parse_csv, parse_jsonl,
-    rank_active_review, score_all, score_all_blocks, score_all_gold_weighted,
-    score_all_latent_truth, score_all_weighted, select_within_budget,
+    PreflightTarget, RankBy, ScoreConfig, ScoreDispersion, ScoreWeights, StabilityReport,
+    Thresholds, action_target_fields, compute_calibration_with_options,
+    compute_evaluator_reliability, compute_fleiss_kappa, compute_krippendorff_alpha,
+    compute_preflight, compute_spearman_rank_correlation, compute_trajectory_audit,
+    group_size_mismatches, loss_recipe_issues, parse_csv, parse_jsonl, rank_active_review,
+    score_all, score_all_blocks, score_all_gold_weighted, score_all_latent_truth,
+    score_all_weighted, select_within_budget,
 };
 
 #[derive(Parser)]
@@ -61,6 +62,8 @@ enum Commands {
     BlockScore(BlockScoreArgs),
     /// Diff block-level trajectory stability between a before/after observation file
     TrajectoryAudit(TrajectoryAuditArgs),
+    /// Check an observation dataset's instrumentation before running the real analysis
+    Preflight(PreflightArgs),
 }
 
 #[derive(ValueEnum, Clone)]
@@ -449,6 +452,66 @@ struct TrajectoryAuditArgs {
     /// dead_unit_rate/saturated_unit_rate above this overrides every other signal.
     #[arg(long, default_value_t = 0.5)]
     pathological_dead_rate: f64,
+}
+
+/// Which downstream command's instrumentation requirements `preflight` checks against. Mirrors
+/// [`quietset::PreflightTarget`] — one variant now; `--for block-score` is a later, named ask.
+#[derive(ValueEnum, Clone)]
+enum PreflightForArg {
+    /// Check what `trajectory-audit` reads: block_id/seed/shuffle_seed/model_id/layer_id/
+    /// loss_recipe/trajectory_effect/update_cosine/dead_unit_count/saturated_unit_count
+    /// coverage, block_id uniqueness via run_id, distinct seed counts per block, and — with
+    /// --after — checkpoint correspondence and before/after comparability.
+    TrajectoryAudit,
+}
+
+impl From<PreflightForArg> for PreflightTarget {
+    fn from(arg: PreflightForArg) -> Self {
+        match arg {
+            PreflightForArg::TrajectoryAudit => PreflightTarget::TrajectoryAudit,
+        }
+    }
+}
+
+#[derive(clap::Args)]
+struct PreflightArgs {
+    /// Observation JSONL to check (not scored). Use '-' for stdin. With --after, this is
+    /// treated as the *before* checkpoint.
+    #[arg(default_value = "-")]
+    input: String,
+
+    /// Which downstream command's instrumentation requirements to check against. Determines
+    /// which fields are reported for coverage and which per-block thresholds apply — a field
+    /// `trajectory-audit` never reads is not a finding just because it is absent.
+    #[arg(long = "for", value_enum)]
+    target: PreflightForArg,
+
+    /// Observation JSONL from the later checkpoint. Optional: without it, preflight runs the
+    /// single-file checks only (field coverage, block_id uniqueness, seed counts, loss recipe
+    /// consistency) and the checkpoint-correspondence and before/after-comparability sections
+    /// are omitted rather than reported as empty. With it, preflight also reports which blocks
+    /// exist on only one side — blocks `trajectory-audit` would silently skip. Not stdin-capable
+    /// ('-'); the positional input already claims stdin. Assumes the positional input and
+    /// --after are checkpoints from the *same* training run: a block_id whose run_id disagrees
+    /// between the two is flagged as a blocking identity contradiction, not a legitimate
+    /// cross-run comparison — trajectory-audit does not support comparing reproducibility
+    /// across distinct runs by block_id alone.
+    #[arg(long)]
+    after: Option<String>,
+
+    /// Skip malformed lines instead of exiting with an error.
+    #[arg(long)]
+    skip_invalid: bool,
+
+    /// Output a single pretty-printed JSON object instead of formatted text.
+    #[arg(long)]
+    json: bool,
+
+    /// Always exit 0, even when blocking issues are found. The report (and its blocking_issues)
+    /// is identical either way — this flag only changes what happens after it's printed, so
+    /// `--json | jq .ready` still reflects the real assessment regardless of whether it's set.
+    #[arg(long)]
+    report_only: bool,
 }
 
 #[derive(clap::Args)]
@@ -994,6 +1057,7 @@ fn main() -> Result<()> {
         Commands::ActiveReview(args) => run_active_review(args),
         Commands::BlockScore(args) => run_block_score(args),
         Commands::TrajectoryAudit(args) => run_trajectory_audit(args),
+        Commands::Preflight(args) => run_preflight(args),
     }
 }
 
@@ -2747,6 +2811,111 @@ fn run_trajectory_audit(args: TrajectoryAuditArgs) -> Result<()> {
                 println!("  reproducibility_3seed:        {r:.4}");
             }
         }
+    }
+    Ok(())
+}
+
+fn print_preflight_side(label: &str, side: &quietset::SidePreflight) {
+    println!(
+        "{label}: {} observation(s), {} block(s)",
+        side.n_observations, side.n_blocks
+    );
+    println!("  field coverage:");
+    for fc in &side.field_coverage {
+        println!(
+            "    {:<20} {}/{} ({:.0}%)",
+            fc.field,
+            fc.n_present,
+            fc.n_total,
+            fc.coverage * 100.0
+        );
+    }
+}
+
+fn run_preflight(args: PreflightArgs) -> Result<()> {
+    let raw = read_input(&args.input)?;
+    let observations = read_observations_jsonl(&raw, args.skip_invalid)?;
+    if observations.is_empty() {
+        anyhow::bail!("no observations found");
+    }
+
+    let after = match &args.after {
+        Some(path) if path == "-" => {
+            anyhow::bail!(
+                "--after does not support stdin ('-'); the positional input already claims stdin"
+            )
+        }
+        Some(path) => {
+            let raw = read_input(path)?;
+            let obs = read_observations_jsonl(&raw, args.skip_invalid)?;
+            if obs.is_empty() {
+                anyhow::bail!("no observations found in --after file {path}");
+            }
+            Some(obs)
+        }
+        None => None,
+    };
+
+    let target = PreflightTarget::from(args.target);
+    let report = compute_preflight(&observations, after.as_deref(), target);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let target_label = match report.target {
+            PreflightTarget::TrajectoryAudit => "trajectory-audit",
+        };
+        println!("=== quietset preflight (for {target_label}) ===\n");
+        print_preflight_side("input", &report.input);
+        if let Some(after_side) = &report.after {
+            println!();
+            print_preflight_side("after", after_side);
+        }
+        if let Some(cc) = &report.checkpoint_correspondence {
+            println!();
+            println!(
+                "checkpoint correspondence: {} matched, {} only in before, {} only in after",
+                cc.n_blocks_matched, cc.n_blocks_only_before, cc.n_blocks_only_after
+            );
+            for block_id in &cc.blocks_only_before {
+                println!("  only in before: {block_id}");
+            }
+            for block_id in &cc.blocks_only_after {
+                println!("  only in after: {block_id}");
+            }
+            for block_id in &cc.blocks_not_comparable {
+                println!("  not comparable (loss_recipe mismatch): {block_id}");
+            }
+            for block_id in &cc.identity_mismatched_blocks {
+                println!("  identity mismatch (disjoint run_id across before/after): {block_id}");
+            }
+        }
+        println!();
+        println!(
+            "ready: {}  ({} blocking issue(s), {} warning(s))",
+            report.ready, report.blocking_issue_count, report.warning_count
+        );
+        if !report.blocking_issues.is_empty() {
+            println!("blocking issues:");
+            for issue in &report.blocking_issues {
+                println!("  - {issue}");
+            }
+        }
+        if !report.warnings.is_empty() {
+            println!("warnings:");
+            for warning in &report.warnings {
+                println!("  - {warning}");
+            }
+        }
+    }
+    io::stdout().flush()?;
+
+    if !report.ready && !args.report_only {
+        anyhow::bail!(
+            "{} blocking issue(s) found; trajectory-audit's output on this input cannot be \
+             trusted (pass --report-only to still exit 0 and just review the report)",
+            report.blocking_issue_count
+        );
     }
     Ok(())
 }

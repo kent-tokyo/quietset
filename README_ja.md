@@ -147,6 +147,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `active-review` | scored JSONL | 再評価の緊急度（低LCB・高エントロピー・分散・感度）でサンプルを順位付け |
 | `block-score` | 観測 JSONL | `block_id` でグループ化し、ブロック単位の軌道安定性を分類 |
 | `trajectory-audit` | 観測 JSONL × 2 | before/after checkpoint 間のブロック単位の軌道安定性を比較 |
+| `preflight` | 観測 JSONL（1つまたは2つ） | 実験開始前の instrumentation チェック：field coverage、`block_id` の一意性、seed 数、checkpoint 対応関係 |
 
 ## 出力フォーマット
 
@@ -169,6 +170,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `compare` | text | `--json`（単一のpretty JSONオブジェクト） | |
 | `audit` | text | `--json`（単一のpretty JSONオブジェクト） | |
 | `policy` | textテーブル | `--output-format text\|json\|csv`（旧`--json`は`json`のエイリアスとして引き続き使用可） | `json`はJSONL(閾値ごとに1行)、`csv`は固定列(`gold_label`が無い場合は空セル) | |
+| `preflight` | text | `--json`（単一のpretty JSONオブジェクト） | blocking issueがあればexit 1（`--report-only`なら0）、warningはexit codeに影響しない |
 
 **CSVはパイプ用途では行き止まり。** `score --output-format csv`、`calibrate --output-format csv`、`policy --output-format csv`はスプレッドシート/BIツール向けのエクスポート専用。他のどのquietsetコマンドもCSVを読み戻せない（`filter`/`summary`/`explain`/`compare`/`audit`/`select`/`recommend`/`active-review`はいずれもJSONL形式の`StabilityReport`を期待し、`stable-wrong-risk`/`calibrate`/`reliability`/`policy`はJSONL形式の`Observation`を期待する）。`score`の出力を他のquietsetコマンドにパイプする予定があるなら、`csv`ではなくデフォルトの`jsonl`を使うこと。
 
@@ -962,6 +964,67 @@ B5  stable_shrink → pathological
 `--group-size N`は、どちらかの側で`block_id`ごとの distinct `sample_id`数が`N`と一致しないブロックについてstderrに警告します — これは破壊的な学習の兆候ではなく、ブロックのグルーピングが壊れている（例: 32局面ブロックが途中で切れている）ことを示します。`block-score`と同じ`--stable-threshold`/`--sensitivity-threshold`/`--pathological-dead-rate`フラグを持ち、`--before`/`--after`両方について同じ`loss_recipe`混在/incomplete coverage警告も出します。
 
 **あるブロックの`loss_recipe`が`--before`と`--after`で異なる場合**（例: beforeが`"baseline"`、afterが`"teacher_conflict_masking"`）、そのエントリは通常の軌道差分としては扱われません——レシピの変更と学習の進行は、deltaだけからは区別できないためです。`comparable`フィールドは`false`になり、`comparison_issue`は`"loss_recipe_mismatch"`になり、`dead_unit_delta`/`saturated_unit_delta`/`trajectory_effect_delta`/`reproducibility_3seed`は計算されずに空/欠如のままになります（`before_classification`/`after_classification`はそれぞれの側単独の報告であり、引き続き意味を持ちます）。テキスト出力では、これらのブロックについて通常のdeltaの代わりに`not comparable: loss_recipe_mismatch`と表示されます。
+
+## preflight コマンド
+
+実際の分析を実行する*前に*、観測データセットのinstrumentationをチェックします。これにより、`block_id`/`shuffle_seed`の欠落を、実験がまだ再計測可能なうちに発見できます——事後に発覚するのではありません:
+
+```bash
+quietset preflight observations.jsonl --for trajectory-audit
+```
+
+```
+=== quietset preflight (for trajectory-audit) ===
+
+input: 30 observation(s), 5 block(s)
+  field coverage:
+    block_id             30/30 (100%)
+    seed                 24/30 (80%)
+    shuffle_seed         18/30 (60%)
+    ...
+
+ready: true  (0 blocking issue(s), 2 warning(s))
+warnings:
+  - input: shuffle_seed coverage is 18/30 (60%)
+  - input: block b3 has only 2 distinct seed value(s) (need >= 3 for reproducibility_3seed)
+```
+
+`--for`は、どの下流コマンドのinstrumentation要件をチェックするかを選択します——現時点では`trajectory-audit`のみ（`block_id`、`seed`、`shuffle_seed`、`model_id`、`layer_id`、`loss_recipe`、`trajectory_effect`、`update_cosine`、`dead_unit_count`、`saturated_unit_count`のcoverage、`run_id`による`block_id`一意性、ブロックごとの distinct `seed`数をチェック）。`--after <path>`を渡すと、後のcheckpointのファイルもチェックでき、3つのチェックが追加で有効になります: 片側にしか存在しないブロック（現状`trajectory-audit`が警告なしで黙ってスキップするブロック）、`loss_recipe`が不一致で not comparable と報告されるはずの突合済みブロック、そして突合済みブロックのうち`run_id`のidentityが両側で矛盾しているもの（同じ`block_id`文字列だが、両側の`run_id`に共通点が全くない——2つの無関係な学習runの間の偶然の衝突であり、本当のbefore/afterペアではない）。`--after`なしではsingle-fileチェックのみが実行されます——後のcheckpointがまだ存在しない段階でinstrumentationをチェックしたい場合に、まさに有用です。
+
+`block_id`一意性チェックは、これまでdocコメントだけだった契約を、新たにコード上で検証するようにしたものです: `block_id`は1つの入力データセット内で一意である必要があり、複数の独立した学習runを1ファイルに統合するproducerは自身で名前空間化する必要があります（例: `"{run_id}:{block_id}"`）。preflightは`run_id`を使ってこれをチェックします——1つの`block_id`グループが複数の異なる`run_id`にまたがっている場合、名前空間化されていない衝突の可能性として報告されます。このチェックは、`run_id`がすべての観測から欠落している場合は不活性です（「問題なし」ではなく「チェック不能」）——`preflight`の出力は`n_missing_run_id`によってこの2つを区別します。
+
+### blockingとwarning、そしてexit code
+
+すべてのチェックは2つのバケットのどちらかに入ります:
+
+| | 意味 | exit codeへの影響 |
+|---|---|---|
+| **blocking**（`blocking_issues`） | `trajectory-audit`の出力がこの入力に対してまったく信頼できない（単なる劣化ではない） | デフォルトで非ゼロ |
+| **warning**（`warnings`） | 特定の指標が劣化しているだけで、それ以外の分析は引き続き意味を持つ | exit codeに影響しない |
+
+Blocking: `block_id`が観測の0%にしか存在しない（そもそもブロックへグループ化できない）、`block_id`が複数の`run_id`にまたがる（名前空間の衝突であり、そのブロック自身の数値がすでに無意味）、あるブロックの`loss_recipe`が内部で混在している、`--before`/`--after`間で対応するブロックがゼロ、突合済みブロックの`run_id`identityが両側で矛盾している、または突合済みブロックの`loss_recipe`が両側で不一致。
+
+Warning: いずれかのfieldの部分的なcoverage（`block_id`を含む——完全な欠如のみがblocking）、distinct `seed`が3未満のブロック（`reproducibility_3seed`だけが計算できないだけで、他はすべて計算できる）、片側にしか存在しないブロックが一部だけある、またはブロック内の部分的な`run_id`/`loss_recipe`のcoverage。
+
+**契約: `--before`/`--after`は同一training runの2つのcheckpointであることを前提とします。** ある`block_id`は両側で同じ`run_id`を持つことが期待されます——`trajectory-audit`は、`block_id`だけで異なるrun間の再現性を比較することをサポートしていません。`--before`と`--after`で`run_id`集合がdisjointな場合にblockingとしているのはこのためです: これは2つの無関係なrun間での偶然の`block_id`衝突として読み取るべきであり、正当なcross-run比較ではありません。異なるrunをまたいで比較したい場合、`block_id`だけではそれを表現できません——lineage/recipe/seedのような明示的な対応キーが必要ですが、それは現時点のこのコードベースには存在しません。`run_id`が食い違っていることを「異なるが比較可能」という意味だと解釈せず、cross-run比較は未サポートとして扱ってください。
+
+`ready`（`blocking_issues`が空のとき`true`）、`blocking_issue_count`、`warning_count`、`blocking_issues`、`warnings`、`comparable_block_count`、`incomparable_block_count`（後者2つは`--after`なしでは`null`）は常に`--json`出力に含まれるため、CIスクリプトは文章を解析せずに`ready`を直接チェックできます:
+
+```bash
+quietset preflight observations.jsonl --for trajectory-audit --json | jq -e '.ready'
+```
+
+`--json`を付けると、テキストの代わりに単一のpretty-printed `PreflightReport`オブジェクトを出力します。
+
+**Exit code:**
+
+| Exit code | 意味 |
+|-----------|------|
+| `0` | blocking issueなし（warningは存在しうる） |
+| `1` | blocking issueあり（または`--report-only`を渡さなかった場合） |
+| 非ゼロ、レポート未出力 | 使用法エラー：空/パース不能な入力、不正なフラグなど——既存のquietsetエラー規約に従う |
+
+`--report-only`を渡すと、blocking issueがあっても常にexit 0にして自分でレポートを確認できます——レポート自体（`ready`、`blocking_issue_count`、`blocking_issues`、すべて）はどちらの場合もバイト単位で同一です。このフラグは出力後に何が起こるかだけを変えます。seed不足や片側だけのブロックは単独では決してblockingになりません——coverageのギャップはwarningであり失敗ではないという`block-score`/`trajectory-audit`の規約に従っています。実際の`trajectory-audit`の出力を積極的に信頼できなくする所見だけがblockingになります。
 
 ## Rust API
 

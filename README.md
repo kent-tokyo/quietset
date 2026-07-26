@@ -172,6 +172,7 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `active-review` | scored JSONL | Rank samples by re-evaluation urgency (low LCB, high entropy, dispersion, sensitivity) |
 | `block-score` | observation JSONL | Group by `block_id` and classify block-level trajectory stability |
 | `trajectory-audit` | 2 observation JSONL | Diff block-level trajectory stability between a before/after checkpoint |
+| `preflight` | observation JSONL (1 or 2) | Pre-experiment instrumentation check: field coverage, `block_id` uniqueness, seed counts, checkpoint correspondence |
 
 ## Output formats
 
@@ -189,6 +190,7 @@ what to expect from each command before scripting against it:
 | `active-review` | JSONL | none | One object per ranked sample |
 | `block-score` | JSONL | none | One object per block |
 | `trajectory-audit` | text | `--json` (JSONL, one object per block) | Sorted most-destructive block first |
+| `preflight` | text | `--json` (single pretty object) | Exits 1 on a blocking issue (0 with `--report-only`); warnings never affect the exit code |
 | `recommend` | JSONL | `--text` | Only command where JSONL is the default and text is the opt-in |
 | `stable-wrong-risk` | single pretty JSON object | none | |
 | `calibrate` | single pretty JSON object | `--output-format json\|csv` | `csv` is a single header row + one data row |
@@ -1263,6 +1265,110 @@ alone. Its `comparable` field is `false`, `comparison_issue` is `"loss_recipe_mi
 left empty/absent rather than computed (`before_classification`/`after_classification` are
 still each side's own report and remain meaningful). Text output prints `not comparable:
 loss_recipe_mismatch` for these blocks instead of the usual deltas.
+
+## preflight command
+
+Checks an observation dataset's instrumentation *before* running the real analysis, so a
+missing `block_id`/`shuffle_seed` is caught while the experiment can still be re-instrumented,
+not discovered after the fact:
+
+```bash
+quietset preflight observations.jsonl --for trajectory-audit
+```
+
+```
+=== quietset preflight (for trajectory-audit) ===
+
+input: 30 observation(s), 5 block(s)
+  field coverage:
+    block_id             30/30 (100%)
+    seed                 24/30 (80%)
+    shuffle_seed         18/30 (60%)
+    ...
+
+ready: true  (0 blocking issue(s), 2 warning(s))
+warnings:
+  - input: shuffle_seed coverage is 18/30 (60%)
+  - input: block b3 has only 2 distinct seed value(s) (need >= 3 for reproducibility_3seed)
+```
+
+`--for` selects which downstream command's instrumentation requirements to check — currently
+only `trajectory-audit` (checking `block_id`, `seed`, `shuffle_seed`, `model_id`, `layer_id`,
+`loss_recipe`, `trajectory_effect`, `update_cosine`, `dead_unit_count`, `saturated_unit_count`
+coverage; `block_id` uniqueness via `run_id`; and distinct `seed` counts per block). Pass
+`--after <path>` to also check a later checkpoint's file — this unlocks three more checks: which
+blocks exist on only one side (blocks `trajectory-audit` would silently skip today, with no
+warning), which matched blocks have a `loss_recipe` mismatch and would be reported as not
+comparable, and which matched blocks have a *contradictory* `run_id` identity between the two
+sides (the same `block_id` string, but the two sides' `run_id`s share nothing in common — an
+accidental collision between two unrelated training runs, not a real before/after pair). Without
+`--after`, preflight runs the single-file checks only — useful precisely when checking
+instrumentation *before* a later checkpoint even exists yet.
+
+The `block_id`-uniqueness check is a new, code-enforced version of a contract that was
+previously only a doc comment: `block_id` must be unique within one input dataset, and a
+producer combining independent training runs into one file must namespace it itself (e.g.
+`"{run_id}:{block_id}"`). preflight checks this via `run_id` — if a `block_id` group spans more
+than one distinct `run_id`, that's reported as a likely unnamespaced collision. This check is
+inert (reports nothing, not "verified unique") when `run_id` is absent from every observation —
+`preflight`'s output distinguishes "no issue found" from "not checkable" via
+`n_missing_run_id`.
+
+### Blocking vs. warning, and exit codes
+
+Every check lands in one of two buckets:
+
+| | Meaning | Exit code effect |
+|---|---|---|
+| **Blocking** (`blocking_issues`) | `trajectory-audit`'s output on this input cannot be trusted at all, not just degraded | Non-zero by default |
+| **Warning** (`warnings`) | A specific metric is degraded, but the rest of the analysis is still meaningful | Never affects exit code |
+
+Blocking: `block_id` present on 0% of observations (nothing can be grouped into blocks at all), a
+`block_id` spanning more than one `run_id` (a namespacing collision, so the block's own numbers
+are already meaningless), a block's `loss_recipe` internally mixed, zero blocks corresponding
+between `--before`/`--after`, a matched block's `run_id` identity contradicting itself across
+sides, or a matched block's `loss_recipe` mismatched across sides.
+
+Warning: partial coverage on any field (including `block_id` — only *total* absence blocks), a
+block with fewer than 3 distinct `seed` values (`reproducibility_3seed` just doesn't compute for
+it — everything else does), some (not all) blocks present on only one side, or partial
+`run_id`/`loss_recipe` coverage within a block.
+
+**Contract: `--before`/`--after` are assumed to be two checkpoints of the same training run.**
+A given `block_id` is expected to carry the same `run_id` on both sides — `trajectory-audit` has
+no support for comparing reproducibility *across* distinct runs by `block_id` alone. This is why
+a disjoint `run_id` set between `--before` and `--after` is blocking rather than a warning: it
+reads as an accidental `block_id` collision between two unrelated runs, not a legitimate
+cross-run comparison. If you need to compare across runs, `block_id` can't express that on its
+own — it would need an explicit shared key (a lineage/recipe/seed identifier) that doesn't exist
+in this codebase today; treat cross-run comparison as unsupported rather than relying on
+disagreeing `run_id`s to mean "different but comparable."
+
+`ready` (`true` when `blocking_issues` is empty), `blocking_issue_count`, `warning_count`,
+`blocking_issues`, `warnings`, `comparable_block_count`, and `incomparable_block_count` (the
+latter two `null` without `--after`) are always in the `--json` output, so a CI script can check
+`ready` directly instead of parsing prose:
+
+```bash
+quietset preflight observations.jsonl --for trajectory-audit --json | jq -e '.ready'
+```
+
+Add `--json` for a single pretty-printed `PreflightReport` object instead of text.
+
+**Exit codes:**
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | No blocking issues (warnings may still be present) |
+| `1` | Blocking issue(s) found (or `--report-only` was not passed) |
+| non-zero, no report printed | Usage error: empty/unparseable input, bad flags, etc. — the existing quietset error convention |
+
+Pass `--report-only` to always exit 0 and just review the report yourself, even with blocking
+issues present — the report (`ready`, `blocking_issue_count`, `blocking_issues`, everything) is
+byte-for-byte identical either way; the flag only changes what happens *after* it's printed.
+Seed shortages and one-sided blocks alone never block, matching the `block-score`/
+`trajectory-audit` convention that a coverage gap is a warning, not a failure — only findings
+that make the eventual `trajectory-audit` run's output actively untrustworthy do.
 
 ## Rust API
 

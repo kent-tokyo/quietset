@@ -2,7 +2,7 @@
 //! "after" observation set (e.g. two training checkpoints), surfacing blocks whose dead/
 //! saturated-unit rates spiked or whose net trajectory effect flipped.
 
-use crate::block::{BlockClass, BlockThresholds, compute_block_report, distinct_loss_recipes};
+use crate::block::{BlockClass, BlockThresholds, compute_block_report, loss_recipe_comparable};
 use crate::group::group_by_block_id;
 use crate::observation::Observation;
 use indexmap::IndexMap;
@@ -115,18 +115,9 @@ pub fn compute_trajectory_audit(
         // Any loss_recipe inconsistency makes this pair non-comparable, whether it's within
         // one side (before_report/after_report already read Insufficient for that reason, but
         // the deltas below are computed from raw obs, not from the classification, so they'd
-        // still silently blend the mixed recipes) or between the two sides. Data that never
-        // uses loss_recipe at all (both sides empty) is unaffected, same as before this check
-        // existed.
-        let before_recipes = distinct_loss_recipes(before_obs);
-        let after_recipes = distinct_loss_recipes(after_obs);
-        let comparison_issue = (before_recipes.len() > 1
-            || after_recipes.len() > 1
-            || (!before_recipes.is_empty()
-                && !after_recipes.is_empty()
-                && before_recipes != after_recipes))
-            .then_some(ComparisonIssue::LossRecipeMismatch);
-        let comparable = comparison_issue.is_none();
+        // still silently blend the mixed recipes) or between the two sides.
+        let comparable = loss_recipe_comparable(before_obs, after_obs);
+        let comparison_issue = (!comparable).then_some(ComparisonIssue::LossRecipeMismatch);
 
         let (dead_unit_delta, saturated_unit_delta, trajectory_effect_delta, reproducibility_3seed) =
             if comparable {

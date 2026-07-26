@@ -165,6 +165,21 @@ pub(crate) fn distinct_loss_recipes(obs: &[Observation]) -> Vec<String> {
         .collect()
 }
 
+/// True when one block's `before`/`after` observations can be diffed as an ordinary trajectory
+/// effect: neither side mixes `loss_recipe` internally, and when both sides populate it they
+/// agree. Data that never uses `loss_recipe` at all (both sides empty) is comparable, same as
+/// before this check existed. Extracted from [`crate::compute_trajectory_audit`] so `preflight`
+/// reports the same rule rather than a copy that can drift from it.
+pub fn loss_recipe_comparable(before: &[Observation], after: &[Observation]) -> bool {
+    let before_recipes = distinct_loss_recipes(before);
+    let after_recipes = distinct_loss_recipes(after);
+    !(before_recipes.len() > 1
+        || after_recipes.len() > 1
+        || (!before_recipes.is_empty()
+            && !after_recipes.is_empty()
+            && before_recipes != after_recipes))
+}
+
 fn loss_recipe_issue(obs: &[Observation]) -> Option<LossRecipeIssue> {
     let recipes = distinct_loss_recipes(obs);
     match recipes.len() {
@@ -764,6 +779,44 @@ mod tests {
             matches!(&b2.1, LossRecipeIssue::IncompleteCoverage { recipe } if recipe == "recipe_a")
         );
         assert!(issues.iter().all(|(id, _)| id != "B3"));
+    }
+
+    #[test]
+    fn test_loss_recipe_comparable_matches_mixed_and_cross_side_cases() {
+        // Extracted from compute_trajectory_audit -- covered end-to-end via that function's
+        // own tests in trajectory_audit.rs; this pins the extracted function directly.
+        let mut same_recipe_before = vec![obs("s1", Some(1), None, None, None, None)];
+        let mut same_recipe_after = vec![obs("s1", Some(1), None, None, None, None)];
+        same_recipe_before[0].loss_recipe = Some("baseline".into());
+        same_recipe_after[0].loss_recipe = Some("baseline".into());
+        assert!(loss_recipe_comparable(
+            &same_recipe_before,
+            &same_recipe_after
+        ));
+
+        let mut mismatched_before = vec![obs("s1", Some(1), None, None, None, None)];
+        let mut mismatched_after = vec![obs("s1", Some(1), None, None, None, None)];
+        mismatched_before[0].loss_recipe = Some("baseline".into());
+        mismatched_after[0].loss_recipe = Some("teacher_conflict_masking".into());
+        assert!(!loss_recipe_comparable(
+            &mismatched_before,
+            &mismatched_after
+        ));
+
+        let mut mixed_within_before = vec![
+            obs("s1", Some(1), None, None, None, None),
+            obs("s2", Some(1), None, None, None, None),
+        ];
+        mixed_within_before[0].loss_recipe = Some("recipe_a".into());
+        mixed_within_before[1].loss_recipe = Some("recipe_b".into());
+        let clean_after = vec![obs("s1", Some(1), None, None, None, None)];
+        assert!(!loss_recipe_comparable(&mixed_within_before, &clean_after));
+
+        let no_recipe_either_side = vec![obs("s1", Some(1), None, None, None, None)];
+        assert!(loss_recipe_comparable(
+            &no_recipe_either_side,
+            &no_recipe_either_side
+        ));
     }
 
     #[test]

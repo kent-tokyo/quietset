@@ -1030,3 +1030,234 @@ fn calibrate_group_by_warns_when_the_field_is_absent_everywhere() {
         stderr(&out)
     );
 }
+
+fn preflight_fixture() -> std::path::PathBuf {
+    write_temp(
+        "preflight_input.jsonl",
+        "{\"sample_id\":\"s1\",\"block_id\":\"b1\",\"seed\":1}\n\
+         {\"sample_id\":\"s2\",\"block_id\":\"b1\",\"seed\":2}\n\
+         {\"sample_id\":\"s3\"}\n",
+    )
+}
+
+#[test]
+fn preflight_reports_partial_block_id_coverage() {
+    let path = preflight_fixture();
+    let out = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+    ]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("block_id"));
+    assert!(text.contains("2/3"), "text: {text}");
+    assert!(text.contains("warnings:"));
+    assert!(text.contains("ready: true"));
+}
+
+#[test]
+fn preflight_json_output_is_a_single_object() {
+    let path = preflight_fixture();
+    let out = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+        "--json",
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(value["target"], "trajectory-audit");
+    assert!(value["after"].is_null());
+    assert!(value["checkpoint_correspondence"].is_null());
+    assert!(value["comparable_block_count"].is_null());
+    assert!(value["incomparable_block_count"].is_null());
+    assert_eq!(value["input"]["n_missing_block_id"], 1);
+    assert_eq!(value["ready"], true, "partial coverage alone is a warning");
+    assert_eq!(value["blocking_issue_count"], 0);
+    assert!(value["warning_count"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn preflight_with_after_reports_blocks_present_on_only_one_side() {
+    let before = write_temp(
+        "preflight_before.jsonl",
+        "{\"sample_id\":\"s1\",\"block_id\":\"b1\"}\n\
+         {\"sample_id\":\"s2\",\"block_id\":\"b2\"}\n",
+    );
+    let after = write_temp(
+        "preflight_after.jsonl",
+        "{\"sample_id\":\"s1\",\"block_id\":\"b1\"}\n\
+         {\"sample_id\":\"s3\",\"block_id\":\"b3\"}\n",
+    );
+    let out = run(&[
+        "preflight",
+        before.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+        "--after",
+        after.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let cc = &value["checkpoint_correspondence"];
+    assert_eq!(cc["n_blocks_matched"], 1);
+    assert_eq!(cc["blocks_only_before"], serde_json::json!(["b2"]));
+    assert_eq!(cc["blocks_only_after"], serde_json::json!(["b3"]));
+}
+
+#[test]
+fn preflight_exits_zero_when_only_warnings_are_found() {
+    // preflight_fixture has partial block_id coverage (warning), not a blocking issue.
+    let path = preflight_fixture();
+    let out = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+    ]);
+    assert!(
+        out.status.success(),
+        "warnings alone must not fail the command"
+    );
+}
+
+#[test]
+fn preflight_exits_one_when_a_blocking_issue_is_found() {
+    // block_id entirely absent -- the narrowest blocking condition.
+    let path = write_temp(
+        "preflight_no_block_id.jsonl",
+        "{\"sample_id\":\"s1\"}\n{\"sample_id\":\"s2\"}\n",
+    );
+    let out = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+    ]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("blocking issue"));
+    // The report itself is still printed before the non-zero exit.
+    assert!(stdout(&out).contains("ready: false"));
+}
+
+#[test]
+fn preflight_report_only_exits_zero_but_reports_identically() {
+    let path = write_temp(
+        "preflight_no_block_id_report_only.jsonl",
+        "{\"sample_id\":\"s1\"}\n{\"sample_id\":\"s2\"}\n",
+    );
+    let blocking = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+        "--json",
+    ]);
+    assert!(!blocking.status.success());
+    let report_only = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+        "--json",
+        "--report-only",
+    ]);
+    assert!(
+        report_only.status.success(),
+        "--report-only must exit 0 even with a blocking issue"
+    );
+
+    let blocking_value: serde_json::Value = serde_json::from_str(&stdout(&blocking)).unwrap();
+    let report_only_value: serde_json::Value = serde_json::from_str(&stdout(&report_only)).unwrap();
+    assert_eq!(
+        blocking_value["ready"], report_only_value["ready"],
+        "--report-only must not change the underlying assessment, only the exit code"
+    );
+    assert_eq!(
+        blocking_value["blocking_issue_count"],
+        report_only_value["blocking_issue_count"]
+    );
+    assert_eq!(
+        blocking_value["blocking_issues"],
+        report_only_value["blocking_issues"]
+    );
+}
+
+#[test]
+fn preflight_seed_shortage_alone_is_not_blocking() {
+    let path = write_temp(
+        "preflight_seed_shortage.jsonl",
+        "{\"sample_id\":\"s1\",\"block_id\":\"b1\",\"seed\":1}\n\
+         {\"sample_id\":\"s2\",\"block_id\":\"b1\",\"seed\":2}\n",
+    );
+    let out = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+        "--json",
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(value["ready"], true);
+    assert_eq!(value["blocking_issue_count"], 0);
+}
+
+#[test]
+fn preflight_detects_before_after_identity_mismatch() {
+    let before = write_temp(
+        "preflight_identity_before.jsonl",
+        "{\"sample_id\":\"s1\",\"block_id\":\"b1\",\"run_id\":\"run1\"}\n",
+    );
+    let after = write_temp(
+        "preflight_identity_after.jsonl",
+        "{\"sample_id\":\"s1\",\"block_id\":\"b1\",\"run_id\":\"run2\"}\n",
+    );
+    let out = run(&[
+        "preflight",
+        before.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+        "--after",
+        after.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(!out.status.success());
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(value["ready"], false);
+    assert_eq!(
+        value["checkpoint_correspondence"]["identity_mismatched_blocks"],
+        serde_json::json!(["b1"])
+    );
+}
+
+#[test]
+fn preflight_empty_input_fails() {
+    let path = write_temp("preflight_empty.jsonl", "");
+    let out = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+    ]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn preflight_after_rejects_stdin() {
+    let path = preflight_fixture();
+    let out = run(&[
+        "preflight",
+        path.to_str().unwrap(),
+        "--for",
+        "trajectory-audit",
+        "--after",
+        "-",
+    ]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("does not support stdin"));
+}

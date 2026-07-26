@@ -73,6 +73,22 @@
   `compute_calibration`'s signature is unchanged and stays that way going forward; the new check
   is opt-in via a new `compute_calibration_with_options(..., &CalibrationOptions)` entry point
   instead
+- New `preflight` command: checks an observation dataset's instrumentation before running
+  `trajectory-audit` for real — required-field coverage, `block_id` uniqueness (via `run_id`),
+  distinct `seed` counts per block, and (with `--after`) checkpoint correspondence, before/after
+  `loss_recipe` comparability, and before/after `run_id` identity contradiction (same `block_id`
+  string, disjoint `run_id` sets — an accidental collision between two unrelated runs). Composes
+  existing `block-score`/`trajectory-audit` building blocks (`group_by_block_id`,
+  `loss_recipe_issues`, the newly-extracted `loss_recipe_comparable`) rather than computing
+  anything new. Findings are split into `blocking_issues` (the eventual `trajectory-audit` run
+  cannot be trusted: a required field entirely absent, a `block_id` spanning multiple `run_id`s,
+  a block's own `loss_recipe` internally mixed, zero corresponding blocks, or a matched block's
+  identity/`loss_recipe` contradiction) and `warnings` (degraded but not wrong: partial coverage,
+  too few seeds, some one-sided blocks). `--json` output includes `ready`, `blocking_issue_count`,
+  `warning_count`, `comparable_block_count`, `incomparable_block_count` alongside the typed
+  detail. Exits 1 by default when `blocking_issues` is non-empty (0 when clean); `--report-only`
+  always exits 0 while leaving the report itself unchanged, for callers that want to review
+  rather than gate
 
 ## 0.15.0 — 2026-07-06
 
