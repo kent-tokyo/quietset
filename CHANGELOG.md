@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0 — 2026-07-26
+
 ### Added
 - Trajectory stability: 10 new optional `Observation` fields (`shuffle_seed`, `loss_recipe`,
   `block_id`, `layer_id`, `gradient_sign`, `update_cosine`, `teacher_residual`,
