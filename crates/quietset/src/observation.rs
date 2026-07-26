@@ -60,6 +60,17 @@ pub struct Observation {
     pub dead_unit_count: Option<f64>,
     /// Count of newly-saturated units in `layer_id` observed for this (sample, run).
     pub saturated_unit_count: Option<f64>,
+    /// Identifies the root artifact this sample was derived from — one game record/kifu, one
+    /// source document, one conversation. Samples sharing a `source_root_id` are not
+    /// independent: nearby positions from the same game record correlate strongly, so a
+    /// calibration/held-out split that puts some on each side leaks information and makes the
+    /// held-out precision optimistic. `calibrate --group-by source-root-id` reports that
+    /// leakage; quietset never builds or repairs the split itself.
+    pub source_root_id: Option<String>,
+    /// Coarser grouping above `source_root_id` (e.g. an opening family for game records, a
+    /// topic cluster for judge data). Same independence caveat one level up: two different
+    /// game records from the same opening family still share structure.
+    pub opening_family: Option<String>,
 }
 
 impl Observation {

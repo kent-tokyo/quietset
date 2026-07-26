@@ -50,6 +50,29 @@
   effect fields are left
   empty/absent rather than computed — a recipe change and training progress can't be told
   apart from the deltas alone
+- Two new optional `Observation` fields, `source_root_id` and `opening_family`, identify the
+  root artifact (a game record/kifu, source document, or conversation) a sample was derived
+  from, so a calibration/held-out split can be checked for leaking correlated samples across
+  the boundary
+- `calibrate` gains `--group-by <source-root-id|opening-family>`: with `--heldout`, reports how
+  many group keys appear on both the primary input and the held-out file, and how completely
+  that could be checked — a split that separates the same game record's nearby positions makes
+  `achieved_precision` optimistic. This is a leakage *report*, not an auto-split: quietset still
+  never partitions your data for you. A partial (not just total) coverage gap is warned
+  separately (`incomplete_group_coverage`) rather than folded into "no leak found," so a leak
+  among the covered rows is never hidden by the missing ones. Adds a `group_leakage` field to
+  `CalibrationResult`/the CLI's JSON output (`null` when not checked; fields: `group_field`,
+  `train_rows`, `heldout_rows`, `rows_with_group`, `rows_missing_group`, `train_unique_groups`,
+  `heldout_unique_groups`, `leaked_group_count`, `leaked_keys_sample`, `leaked_keys_truncated`,
+  `coverage`), extends the existing `note` caveat, and adds 3 columns to `--output-format csv`
+  (12 → 15: `group_field`, `leaked_group_count`, `group_coverage`) — the original 12 keep their
+  order and meaning unchanged. `leaked_group_count` is always the exact total; `leaked_keys_sample`
+  caps at 100 sorted keys (`leaked_keys_truncated` flags when it's a prefix) so a dataset with a
+  very large number of leaked groups can't make an ordinary run's report grow unboundedly — the
+  new `leaked_group_keys` function returns the complete, uncapped list for callers that need it.
+  `compute_calibration`'s signature is unchanged and stays that way going forward; the new check
+  is opt-in via a new `compute_calibration_with_options(..., &CalibrationOptions)` entry point
+  instead
 
 ## 0.15.0 — 2026-07-06
 

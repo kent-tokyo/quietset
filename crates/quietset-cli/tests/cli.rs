@@ -336,10 +336,10 @@ fn calibrate_csv_output_has_header_and_one_data_row() {
     let header = lines.next().expect("header row");
     assert_eq!(
         header,
-        "decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note"
+        "decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note,group_field,leaked_group_count,group_coverage"
     );
     let data = lines.next().expect("one data row");
-    assert_eq!(data.split(',').count(), 12);
+    assert_eq!(data.split(',').count(), 15);
     assert!(lines.next().is_none(), "should be exactly one data row");
 }
 
@@ -832,5 +832,201 @@ fn score_csv_header_is_unchanged_by_trajectory_stability_fields() {
          confidence,adjusted_stability_score,disagreement_score,stability_score,decision,\
          component_label,component_score_consistency,component_budget_robustness,\
          component_seed_robustness,component_model_agreement,component_evaluator_agreement"
+    );
+}
+
+#[test]
+fn calibrate_group_by_warns_and_reports_leaked_source_root_id() {
+    let train = write_temp(
+        "calibrate_groupby_train.jsonl",
+        "{\"sample_id\":\"a\",\"label\":\"win\",\"gold_label\":\"win\",\"source_root_id\":\"g1\"}\n\
+         {\"sample_id\":\"b\",\"label\":\"win\",\"gold_label\":\"win\",\"source_root_id\":\"g2\"}\n",
+    );
+    let heldout = write_temp(
+        "calibrate_groupby_heldout.jsonl",
+        "{\"sample_id\":\"c\",\"label\":\"win\",\"gold_label\":\"win\",\"source_root_id\":\"g2\"}\n",
+    );
+    let out = run(&[
+        "calibrate",
+        train.to_str().unwrap(),
+        "--target-precision",
+        "0.5",
+        "--heldout",
+        heldout.to_str().unwrap(),
+        "--group-by",
+        "source-root-id",
+    ]);
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("group key(s) (source_root_id) appear in both"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("leaked source_root_id: g2"));
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(value["group_leakage"]["leaked_group_count"], 1);
+    assert_eq!(
+        value["group_leakage"]["leaked_keys_sample"],
+        serde_json::json!(["g2"])
+    );
+    assert_eq!(value["group_leakage"]["leaked_keys_truncated"], false);
+    assert_eq!(value["group_leakage"]["train_rows"], 2);
+    assert_eq!(value["group_leakage"]["heldout_rows"], 1);
+    assert_eq!(value["group_leakage"]["rows_missing_group"], 0);
+    assert_eq!(value["group_leakage"]["coverage"], 1.0);
+}
+
+#[test]
+fn calibrate_group_by_works_for_opening_family() {
+    let train = write_temp(
+        "calibrate_groupby_train_of.jsonl",
+        "{\"sample_id\":\"a\",\"label\":\"win\",\"gold_label\":\"win\",\"opening_family\":\"sicilian\"}\n\
+         {\"sample_id\":\"b\",\"label\":\"win\",\"gold_label\":\"win\",\"opening_family\":\"french\"}\n",
+    );
+    let heldout = write_temp(
+        "calibrate_groupby_heldout_of.jsonl",
+        "{\"sample_id\":\"c\",\"label\":\"win\",\"gold_label\":\"win\",\"opening_family\":\"sicilian\"}\n",
+    );
+    let out = run(&[
+        "calibrate",
+        train.to_str().unwrap(),
+        "--target-precision",
+        "0.5",
+        "--heldout",
+        heldout.to_str().unwrap(),
+        "--group-by",
+        "opening-family",
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(value["group_leakage"]["group_field"], "opening_family");
+    assert_eq!(value["group_leakage"]["leaked_group_count"], 1);
+}
+
+#[test]
+fn calibrate_group_by_warns_on_partial_group_field_coverage() {
+    let train = write_temp(
+        "calibrate_groupby_partial_train.jsonl",
+        "{\"sample_id\":\"a\",\"label\":\"win\",\"gold_label\":\"win\",\"source_root_id\":\"g1\"}\n\
+         {\"sample_id\":\"b\",\"label\":\"win\",\"gold_label\":\"win\"}\n",
+    );
+    let heldout = write_temp(
+        "calibrate_groupby_partial_heldout.jsonl",
+        "{\"sample_id\":\"c\",\"label\":\"win\",\"gold_label\":\"win\",\"source_root_id\":\"g1\"}\n\
+         {\"sample_id\":\"d\",\"label\":\"win\",\"gold_label\":\"win\"}\n",
+    );
+    let out = run(&[
+        "calibrate",
+        train.to_str().unwrap(),
+        "--target-precision",
+        "0.5",
+        "--heldout",
+        heldout.to_str().unwrap(),
+        "--group-by",
+        "source-root-id",
+    ]);
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("incomplete_group_coverage"),
+        "partial coverage must warn distinctly from either \"clean\" or \"unchecked\", stderr: {}",
+        stderr(&out)
+    );
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(
+        value["group_leakage"]["leaked_group_count"], 1,
+        "the leak among the covered rows must still be found, not hidden by the missing rows"
+    );
+    assert_eq!(value["group_leakage"]["rows_missing_group"], 2);
+    assert_eq!(value["group_leakage"]["coverage"], 0.5);
+}
+
+#[test]
+fn calibrate_group_leakage_json_keys_are_fixed() {
+    let train = write_temp(
+        "calibrate_groupby_keys_train.jsonl",
+        "{\"sample_id\":\"a\",\"label\":\"win\",\"gold_label\":\"win\",\"source_root_id\":\"g1\"}\n",
+    );
+    let heldout = write_temp(
+        "calibrate_groupby_keys_heldout.jsonl",
+        "{\"sample_id\":\"c\",\"label\":\"win\",\"gold_label\":\"win\",\"source_root_id\":\"g1\"}\n",
+    );
+    let out = run(&[
+        "calibrate",
+        train.to_str().unwrap(),
+        "--target-precision",
+        "0.5",
+        "--heldout",
+        heldout.to_str().unwrap(),
+        "--group-by",
+        "source-root-id",
+    ]);
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let mut keys: Vec<&str> = value["group_leakage"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "coverage",
+            "group_field",
+            "heldout_rows",
+            "heldout_unique_groups",
+            "leaked_group_count",
+            "leaked_keys_sample",
+            "leaked_keys_truncated",
+            "rows_missing_group",
+            "rows_with_group",
+            "train_rows",
+            "train_unique_groups",
+        ]
+    );
+}
+
+#[test]
+fn calibrate_group_by_without_heldout_warns_it_is_a_no_op() {
+    let train = gold_labeled_fixture();
+    let out = run(&[
+        "calibrate",
+        train.to_str().unwrap(),
+        "--target-precision",
+        "0.5",
+        "--group-by",
+        "source-root-id",
+    ]);
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("--group-by has no effect without --heldout"),
+        "stderr: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn calibrate_group_by_warns_when_the_field_is_absent_everywhere() {
+    let train = gold_labeled_fixture();
+    let heldout = write_temp(
+        "calibrate_groupby_missing_heldout.jsonl",
+        "{\"sample_id\":\"c\",\"label\":\"win\",\"gold_label\":\"win\"}\n",
+    );
+    let out = run(&[
+        "calibrate",
+        train.to_str().unwrap(),
+        "--target-precision",
+        "0.5",
+        "--heldout",
+        heldout.to_str().unwrap(),
+        "--group-by",
+        "source-root-id",
+    ]);
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("no observation on either side carries source_root_id"),
+        "stderr: {}",
+        stderr(&out)
     );
 }

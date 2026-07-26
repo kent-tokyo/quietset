@@ -208,6 +208,19 @@ quietset calibrate input.jsonl --target-precision 0.98 --decision-score lcb
 | `dead_unit_count` | この（sample, run）における`layer_id`内の新規dead unit数 |
 | `saturated_unit_count` | この（sample, run）における`layer_id`内の新規saturated unit数 |
 
+### 分割整合性フィールド（省略可能）
+
+サンプルがどのルート成果物から派生したかを識別する追加の省略可能フィールドが2個あります。`calibrate --group-by`はこれを使い、calibration/held-out分割が相関したサンプルを誤って分断していないかを検出します:
+
+```json
+{"sample_id":"p1","source_root_id":"game_00042","opening_family":"sicilian_najdorf"}
+```
+
+| フィールド | 意味 |
+|-----------|------|
+| `source_root_id` | 1つの棋譜、ソースドキュメント、または会話。この値を共有するサンプルは独立ではない——同一棋譜の近接局面は強く相関する |
+| `opening_family` | `source_root_id`より粗いグループ化（例: 棋譜の戦型、judgeデータのトピッククラスタ）。独立性への注意点は1段階上でも同様 |
+
 ## 出力 JSONL フォーマット
 
 主要フィールド（計算できない場合は省略されます）:
@@ -632,9 +645,11 @@ quietset calibrate input.jsonl --target-precision 0.95 --heldout heldout_gold.js
 quietset calibrate input.jsonl --target-precision 0.95 --output-format csv
 ```
 ```csv
-decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note
-lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
+decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note,group_field,leaked_group_count,group_coverage
+lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate.",,,
 ```
+
+元の12列は順序・意味とも変更なし。`group_field`/`leaked_group_count`/`group_coverage`は末尾に追加され、`--group-by`を`--heldout`と併用しない限り空になります。`group_coverage`という名前は、7番目に既にある無関係な`coverage`列（precision/recallのcoverageであり、groupフィールドのcoverageではない）との衝突を避けるためです。
 
 `--fail-below-target` を使うと `calibrate` を CI gate にできます: 結果を出力した上で、`achieved_precision` が `--target-precision` を下回っていれば非ゼロで終了します。`--heldout` なしでは実質的に no-op です（grid search が既に主入力での `achieved_precision >= --target-precision` を保証するか、そうでなければエラーで失敗するため）。`--heldout` を使う場合、`achieved_precision` は held-out での測定値であり、目標を下回ることが正当にあり得ます — このフラグはその正直なシグナルを CI パイプラインが判定できる形にします:
 
@@ -642,6 +657,50 @@ lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,,false,"achie
 quietset calibrate train.jsonl --heldout heldout.jsonl --target-precision 0.98 --fail-below-target
 echo "exit code: $?"
 ```
+
+### calibrate --group-by
+
+`--heldout`が機能するのは、2つのファイルが本当に独立している場合のみです。同一棋譜（あるいは同じ戦型、会話など）の近接サンプルが2つのファイルにまたがって分割されていると、held-out precisionは一部見たことのあるデータを測定していることになり、本当に独立した推定値より楽観的な値になります。`--group-by`はこの漏洩を報告します——分割の構築や修復は行いません。`--heldout`は引き続き自分で用意してください:
+
+```bash
+quietset calibrate train.jsonl --heldout heldout.jsonl --target-precision 0.95 \
+  --group-by source-root-id
+```
+
+```
+warning: 1 group key(s) (source_root_id) appear in both the calibration input and --heldout; achieved_precision is optimistic
+  leaked source_root_id: game_00042
+```
+
+```json
+{
+  "group_leakage": {
+    "group_field": "source_root_id",
+    "train_rows": 3,
+    "heldout_rows": 2,
+    "rows_with_group": 5,
+    "rows_missing_group": 0,
+    "train_unique_groups": 3,
+    "heldout_unique_groups": 2,
+    "leaked_group_count": 1,
+    "leaked_keys_sample": ["game_00042"],
+    "leaked_keys_truncated": false,
+    "coverage": 1.0
+  },
+  "note": "1 group key(s) (source_root_id) appear in both the calibration input and --heldout — those held-out samples are correlated with samples the threshold was selected on, so achieved_precision is optimistic."
+}
+```
+
+`--group-by`は`source-root-id`または`opening-family`を受け付け（`source_root_id`/`opening_family`観測フィールドを読む——[分割整合性フィールド](#分割整合性フィールド省略可能)を参照）、`group_leakage`は何もチェックしなかった場合（`--group-by`なし、または`--heldout`なし）は`null`になります——`leaked_group_count: 0`（チェックできた行の範囲でクリーンな分割だった）とは区別されます。`--heldout`なしでは`--group-by`にチェックすべき分割が存在せず、警告のみが出力されます。
+
+`leaked_group_count: 0`を「検証済みでクリーン」と誤読させないための2つのガード:
+
+- **どちらの側にもそのフィールドを持つ行が1つもない**場合（`rows_with_group: 0`）——quietsetはクリーンな分割と黙って報告するのではなく、漏洩をチェックできなかったと警告します。producer側とquietset側でフィールド名が食い違っていた場合、それが検証済みの結果ではなく偶然「0件の共有グループ」と読めてしまうのを防ぐためです。
+- **一部の行だけがそのフィールドを持つ**場合（`rows_missing_group > 0`、`coverage < 1.0`）——quietsetはstderrに`incomplete_group_coverage`を警告します。カバーされた行の中で見つかった漏洩は引き続き報告されます（欠損行を除外して漏洩を隠すことはありません）が、クリーンな結果はカバーされた部分のみを検証したものであり、ファイル全体を検証したわけではありません。
+
+`leaked_group_count`は常に正確な全件数で、データセットの規模によらず全ての漏洩グループを対象に計算されます。`leaked_keys_sample`はそのうち最大100件を列挙します（ソート済みなので、どの100件かは決定的です）——これにより、漏洩グループが非常に多いデータセットでも、通常のcalibrate実行の出力サイズが無制限に増えることはありません。`leaked_keys_truncated`は、サンプルが完全なセットではなく先頭部分である場合（`leaked_group_count > leaked_keys_sample.len()`）に`true`になります。完全な非切り詰めリストが必要な場合は、Rust APIの`leaked_group_keys(calibration, heldout, key)`を直接呼び出してください——`group_leakage`が内部で使うのと同じ計算を、上限なしで行います。
+
+`compute_calibration`のパラメータリストは変更なく、今後も増えません——`--group-by`はRust APIの別エントリポイント`compute_calibration_with_options(..., &CalibrationOptions { group_by })`として実装されているため、既存の`compute_calibration`の呼び出し元はこの機能の影響を受けません。
 
 ## select コマンド
 

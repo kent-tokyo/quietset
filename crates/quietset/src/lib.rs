@@ -41,7 +41,10 @@ pub use block::{
     BlockClass, BlockStabilityReport, BlockThresholds, LossRecipeIssue, compute_block_report,
     loss_recipe_issues, score_all_blocks,
 };
-pub use calibration::{CalibrationResult, compute_calibration};
+pub use calibration::{
+    CalibrationOptions, CalibrationResult, GroupKey, GroupLeakage, compute_calibration,
+    compute_calibration_with_options, group_leakage, leaked_group_keys,
+};
 pub use config::{
     DecisionScore, LatentTruthSafety, MinRequirements, ScoreConfig, ScoreDispersion, ScoreWeights,
 };

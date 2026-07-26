@@ -247,6 +247,21 @@ itself:
 | `dead_unit_count` | Count of newly-dead units in `layer_id` for this (sample, run) |
 | `saturated_unit_count` | Count of newly-saturated units in `layer_id` for this (sample, run) |
 
+### Split-integrity fields (optional)
+
+2 additional optional fields identify which root artifact a sample was derived from, so
+`calibrate --group-by` can detect when a calibration/held-out split accidentally separates
+correlated samples:
+
+```json
+{"sample_id":"p1","source_root_id":"game_00042","opening_family":"sicilian_najdorf"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `source_root_id` | One game record/kifu, source document, or conversation. Samples sharing this value are not independent — nearby positions from the same game record correlate strongly. |
+| `opening_family` | Coarser grouping above `source_root_id` (e.g. an opening family for game records, a topic cluster for judge data). Same independence caveat one level up. |
+
 ## Output JSONL format
 
 Key fields in the output (optional fields are omitted when not computable):
@@ -788,9 +803,14 @@ Use `--output-format csv` for a single header row + one data row instead of a JS
 quietset calibrate input.jsonl --target-precision 0.95 --output-format csv
 ```
 ```csv
-decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note
-lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate."
+decision_score,keep_threshold,drop_threshold,achieved_precision,precision_ci_low,precision_ci_high,coverage,n_keep,n_total,train_precision,validated_on_heldout,note,group_field,leaked_group_count,group_coverage
+lcb,0.910000,0.400000,0.982000,0.943000,0.997000,0.610000,610,1000,,false,"achieved_precision and its confidence interval were selected and measured on the same gold-labeled data; the threshold search makes this optimistic. Pass --heldout <path> for an independent estimate.",,,
 ```
+
+The original 12 columns keep their order and meaning unchanged; `group_field`/
+`leaked_group_count`/`group_coverage` are appended at the end and are empty unless `--group-by`
+was used with `--heldout`. `group_coverage` is named to avoid colliding with the unrelated
+`coverage` column (precision/recall coverage, not group-field coverage) already at position 7.
 
 Use `--fail-below-target` to make `calibrate` a CI gate: it exits non-zero (after still printing
 the result) if `achieved_precision` falls short of `--target-precision`. Without `--heldout`
@@ -803,6 +823,74 @@ turns that honest signal into something a CI pipeline can act on:
 quietset calibrate train.jsonl --heldout heldout.jsonl --target-precision 0.98 --fail-below-target
 echo "exit code: $?"
 ```
+
+### calibrate --group-by
+
+`--heldout` only works if the two files are genuinely independent. If nearby samples from the
+same game record (or the same opening family, conversation, etc.) end up split across the two
+files, the held-out precision is measuring partly-seen data and reads more optimistic than a
+genuinely independent estimate. `--group-by` reports that leakage — it does not build or repair
+the split for you; you still prepare `--heldout` yourself:
+
+```bash
+quietset calibrate train.jsonl --heldout heldout.jsonl --target-precision 0.95 \
+  --group-by source-root-id
+```
+
+```
+warning: 1 group key(s) (source_root_id) appear in both the calibration input and --heldout; achieved_precision is optimistic
+  leaked source_root_id: game_00042
+```
+
+```json
+{
+  "group_leakage": {
+    "group_field": "source_root_id",
+    "train_rows": 3,
+    "heldout_rows": 2,
+    "rows_with_group": 5,
+    "rows_missing_group": 0,
+    "train_unique_groups": 3,
+    "heldout_unique_groups": 2,
+    "leaked_group_count": 1,
+    "leaked_keys_sample": ["game_00042"],
+    "leaked_keys_truncated": false,
+    "coverage": 1.0
+  },
+  "note": "1 group key(s) (source_root_id) appear in both the calibration input and --heldout — those held-out samples are correlated with samples the threshold was selected on, so achieved_precision is optimistic."
+}
+```
+
+`--group-by` accepts `source-root-id` or `opening-family` (reading the `source_root_id`/
+`opening_family` observation fields — see
+[Split-integrity fields](#split-integrity-fields-optional)). `group_leakage` is `null` when
+nothing was checked (no `--group-by`, or no `--heldout`) — distinct from `leaked_group_count: 0`,
+which means the check ran and found a clean split among the rows it could check. Without
+`--heldout`, `--group-by` has no split to check and only prints a warning.
+
+Two counts guard against `leaked_group_count: 0` being misread as "verified clean":
+
+- **No row on either side carries the field at all** (`rows_with_group: 0`) — quietset warns
+  that leakage could not be checked, rather than silently reporting a clean split. A field-name
+  mismatch between your producer and `--group-by` would otherwise read as "0 shared groups" by
+  coincidence, not by verification.
+- **Some, but not all, rows carry the field** (`rows_missing_group > 0`, `coverage < 1.0`) —
+  quietset warns `incomplete_group_coverage` on stderr: a leak found among the covered rows is
+  still reported (the check never hides a leak by excluding the missing rows), but a *clean*
+  result on partial coverage means only the covered portion was verified, not the whole file.
+
+`leaked_group_count` is always the exact total, computed over every leaked group regardless of
+dataset size. `leaked_keys_sample` lists at most 100 of them (sorted, so it's deterministic which
+100), so a dataset with a very large number of leaked groups can't make an ordinary calibration
+run's output grow without bound; `leaked_keys_truncated` is `true` when the sample is a prefix
+rather than the complete set (`leaked_group_count > leaked_keys_sample.len()`). If you need the
+complete, uncapped list, call the Rust API's `leaked_group_keys(calibration, heldout, key)`
+directly — it's the same computation `group_leakage` uses internally, just without the cap.
+
+`compute_calibration`'s parameter list is unchanged and never grows — `--group-by` is implemented
+via a separate `compute_calibration_with_options(..., &CalibrationOptions { group_by })` entry
+point in the Rust API, so existing library callers of `compute_calibration` are unaffected by
+this feature.
 
 > **Note:** calibrate cannot separate stable-correct from stable-wrong samples — if a sample
 > consistently gets the wrong label, its `stability_score` is indistinguishable from a correct

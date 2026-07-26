@@ -8,14 +8,14 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use quietset::{
-    ActiveReviewCosts, ActiveReviewWeights, BlockThresholds, Decision, DecisionScore,
-    LatentTruthSafety, LossRecipeIssue, MinRequirements, Observation, RankBy, ScoreConfig,
-    ScoreDispersion, ScoreWeights, StabilityReport, Thresholds, action_target_fields,
-    compute_calibration, compute_evaluator_reliability, compute_fleiss_kappa,
-    compute_krippendorff_alpha, compute_spearman_rank_correlation, compute_trajectory_audit,
-    group_size_mismatches, loss_recipe_issues, parse_csv, parse_jsonl, rank_active_review,
-    score_all, score_all_blocks, score_all_gold_weighted, score_all_latent_truth,
-    score_all_weighted, select_within_budget,
+    ActiveReviewCosts, ActiveReviewWeights, BlockThresholds, CalibrationOptions, Decision,
+    DecisionScore, GroupKey, LatentTruthSafety, LossRecipeIssue, MinRequirements, Observation,
+    RankBy, ScoreConfig, ScoreDispersion, ScoreWeights, StabilityReport, Thresholds,
+    action_target_fields, compute_calibration_with_options, compute_evaluator_reliability,
+    compute_fleiss_kappa, compute_krippendorff_alpha, compute_spearman_rank_correlation,
+    compute_trajectory_audit, group_size_mismatches, loss_recipe_issues, parse_csv, parse_jsonl,
+    rank_active_review, score_all, score_all_blocks, score_all_gold_weighted,
+    score_all_latent_truth, score_all_weighted, select_within_budget,
 };
 
 #[derive(Parser)]
@@ -607,12 +607,43 @@ struct CalibrateArgs {
     /// legitimately fall short — this flag turns that honest signal into a CI-friendly gate.
     #[arg(long)]
     fail_below_target: bool,
+    /// Report calibration/held-out leakage at this grouping level. Samples sharing a group key
+    /// — all positions from one game record (source-root-id), or all records from one opening
+    /// family (opening-family) — are not independent, so a split that puts some of them in the
+    /// primary input and some in --heldout makes the held-out precision optimistic: it is
+    /// partly measuring data the threshold was already selected against. This flag only
+    /// *reports* the overlap (how many group keys appear on both sides, what fraction of
+    /// --heldout they cover, and how many observations carry no key at all); quietset does not
+    /// build or repair the split for you. No effect without --heldout, since there is no split
+    /// to check — a warning is printed in that case rather than failing.
+    #[arg(long, value_enum)]
+    group_by: Option<GroupByArg>,
 }
 
 #[derive(ValueEnum, Clone)]
 enum CalibrateFormat {
     Json,
     Csv,
+}
+
+/// Which `Observation` field a calibration/held-out split is checked for leakage on. Mirrors
+/// [`quietset::GroupKey`] — see that type for why this is a closed set rather than a free-form
+/// field name.
+#[derive(ValueEnum, Clone)]
+enum GroupByArg {
+    /// Group by `source_root_id` — one game record / source document / conversation.
+    SourceRootId,
+    /// Group by `opening_family` — the coarser cluster above `source_root_id`.
+    OpeningFamily,
+}
+
+impl From<GroupByArg> for GroupKey {
+    fn from(arg: GroupByArg) -> Self {
+        match arg {
+            GroupByArg::SourceRootId => GroupKey::SourceRootId,
+            GroupByArg::OpeningFamily => GroupKey::OpeningFamily,
+        }
+    }
 }
 
 #[derive(clap::Args)]
@@ -2401,7 +2432,14 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
         None => None,
     };
 
-    let result = compute_calibration(
+    let group_by: Option<GroupKey> = args.group_by.map(GroupKey::from);
+    if group_by.is_some() && heldout.is_none() {
+        eprintln!(
+            "warning: --group-by has no effect without --heldout; there is no split to check for leakage"
+        );
+    }
+
+    let result = compute_calibration_with_options(
         &observations,
         &decision_score,
         args.confidence_level,
@@ -2409,6 +2447,7 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
         args.target_coverage,
         args.drop_threshold,
         heldout.as_deref(),
+        &CalibrationOptions { group_by },
     )
     .ok_or_else(|| {
         anyhow::anyhow!(
@@ -2419,6 +2458,44 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
     })?;
 
     let validated_on_heldout = args.heldout.is_some();
+
+    const MAX_DISPLAYED_LEAKED_KEYS: usize = 10;
+    if let Some(leakage) = &result.group_leakage {
+        let field = leakage.group_field;
+        if leakage.rows_with_group == 0 {
+            eprintln!(
+                "warning: --group-by {field}: no observation on either side carries {field}; leakage could not be checked"
+            );
+        } else {
+            if leakage.leaked_group_count > 0 {
+                eprintln!(
+                    "warning: {} group key(s) ({field}) appear in both the calibration input and --heldout; achieved_precision is optimistic",
+                    leakage.leaked_group_count
+                );
+                for key in leakage
+                    .leaked_keys_sample
+                    .iter()
+                    .take(MAX_DISPLAYED_LEAKED_KEYS)
+                {
+                    eprintln!("  leaked {field}: {key}");
+                }
+                if leakage.leaked_group_count > MAX_DISPLAYED_LEAKED_KEYS {
+                    eprintln!(
+                        "  ...and {} more",
+                        leakage.leaked_group_count - MAX_DISPLAYED_LEAKED_KEYS
+                    );
+                }
+            }
+            if leakage.rows_missing_group > 0 {
+                eprintln!(
+                    "warning: incomplete_group_coverage: {} of {} row(s) carry no {field} ({:.1}% coverage); leakage was checked only on the rows that do",
+                    leakage.rows_missing_group,
+                    leakage.train_rows + leakage.heldout_rows,
+                    leakage.coverage * 100.0
+                );
+            }
+        }
+    }
 
     match args.output_format {
         CalibrateFormat::Json => {
@@ -2437,6 +2514,7 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
                     "train_precision":      result.train_precision,
                     "validated_on_heldout": validated_on_heldout,
                     "note":                 result.note,
+                    "group_leakage":        result.group_leakage,
                 }))?
             );
         }
@@ -2455,6 +2533,9 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
                 "train_precision",
                 "validated_on_heldout",
                 "note",
+                "group_field",
+                "leaked_group_count",
+                "group_coverage",
             ])?;
             wtr.write_record([
                 result.decision_score_name.to_string(),
@@ -2472,6 +2553,21 @@ fn run_calibrate(args: CalibrateArgs) -> Result<()> {
                     .unwrap_or_default(),
                 validated_on_heldout.to_string(),
                 result.note.clone().unwrap_or_default(),
+                result
+                    .group_leakage
+                    .as_ref()
+                    .map(|gl| gl.group_field.to_string())
+                    .unwrap_or_default(),
+                result
+                    .group_leakage
+                    .as_ref()
+                    .map(|gl| gl.leaked_group_count.to_string())
+                    .unwrap_or_default(),
+                result
+                    .group_leakage
+                    .as_ref()
+                    .map(|gl| format!("{:.6}", gl.coverage))
+                    .unwrap_or_default(),
             ])?;
             wtr.flush()?;
         }

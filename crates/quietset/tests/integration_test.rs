@@ -1,9 +1,10 @@
 use quietset::{
-    Decision, DecisionScore, LatentTruthSafety, MinRequirements, Observation, ScoreConfig,
-    ScoreDispersion, ScoreWeights, StabilityReport, Thresholds, compute_calibration,
-    compute_evaluator_label_weights, compute_evaluator_reliability, compute_evaluator_weights,
-    compute_fleiss_kappa, compute_krippendorff_alpha, compute_weighted_majority,
-    compute_weighted_majority_by_label, parse_jsonl, score_all, score_all_gold_weighted,
+    CalibrationOptions, Decision, DecisionScore, GroupKey, LatentTruthSafety, MinRequirements,
+    Observation, ScoreConfig, ScoreDispersion, ScoreWeights, StabilityReport, Thresholds,
+    compute_calibration, compute_calibration_with_options, compute_evaluator_label_weights,
+    compute_evaluator_reliability, compute_evaluator_weights, compute_fleiss_kappa,
+    compute_krippendorff_alpha, compute_weighted_majority, compute_weighted_majority_by_label,
+    group_leakage, leaked_group_keys, parse_jsonl, score_all, score_all_gold_weighted,
     score_all_latent_truth, score_all_weighted,
 };
 
@@ -1408,6 +1409,425 @@ fn test_calibrate_heldout_no_gold_returns_none() {
         .is_none(),
         "heldout with no gold_label should return None, mirroring the \
          training-gold-missing convention"
+    );
+}
+
+#[test]
+fn test_compute_calibration_matches_compute_calibration_with_options_default() {
+    // Backward-compatibility guard: the plain compute_calibration must be indistinguishable
+    // from compute_calibration_with_options called with CalibrationOptions::default() -- not
+    // just "compiles", but bit-for-bit the same result on a fixture that exercises heldout,
+    // note, and group_leakage.
+    let make = |id: &str, label: &str, gold: &str, n: usize| -> Vec<Observation> {
+        (0..n)
+            .map(|i| Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                gold_label: Some(gold.into()),
+                evaluator_id: Some(format!("e{i}")),
+                ..Default::default()
+            })
+            .collect()
+    };
+    let mut train = Vec::new();
+    for i in 0..9 {
+        train.extend(make(&format!("t{i}"), "win", "win", 5));
+    }
+    train.extend(make("tw", "loss", "win", 5));
+    let mut heldout = Vec::new();
+    for i in 0..2 {
+        heldout.extend(make(&format!("h{i}"), "win", "win", 5));
+    }
+    for i in 0..8 {
+        heldout.extend(make(&format!("hw{i}"), "loss", "win", 5));
+    }
+
+    let via_plain = compute_calibration(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.80,
+        None,
+        0.40,
+        Some(&heldout),
+    )
+    .expect("plain API should calibrate");
+    let via_options = compute_calibration_with_options(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.80,
+        None,
+        0.40,
+        Some(&heldout),
+        &CalibrationOptions::default(),
+    )
+    .expect("options API with defaults should calibrate identically");
+
+    assert_eq!(via_plain.keep_threshold, via_options.keep_threshold);
+    assert_eq!(via_plain.achieved_precision, via_options.achieved_precision);
+    assert_eq!(via_plain.coverage, via_options.coverage);
+    assert_eq!(via_plain.n_keep, via_options.n_keep);
+    assert_eq!(via_plain.n_total, via_options.n_total);
+    assert_eq!(via_plain.train_precision, via_options.train_precision);
+    assert_eq!(via_plain.note, via_options.note);
+    assert!(via_plain.group_leakage.is_none());
+    assert!(via_options.group_leakage.is_none());
+}
+
+fn obs_with_group(sample_id: &str, source_root_id: &str) -> Observation {
+    Observation {
+        sample_id: sample_id.into(),
+        label: Some("win".into()),
+        gold_label: Some("win".into()),
+        source_root_id: Some(source_root_id.into()),
+        ..Default::default()
+    }
+}
+
+fn obs_with_opening_family(sample_id: &str, opening_family: &str) -> Observation {
+    Observation {
+        sample_id: sample_id.into(),
+        label: Some("win".into()),
+        gold_label: Some("win".into()),
+        opening_family: Some(opening_family.into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_group_leakage_detects_shared_source_root_id() {
+    let calibration = vec![obs_with_group("a", "g1"), obs_with_group("b", "g2")];
+    let heldout = vec![obs_with_group("c", "g2"), obs_with_group("d", "g3")];
+    let leakage = group_leakage(&calibration, &heldout, GroupKey::SourceRootId);
+    assert_eq!(leakage.train_unique_groups, 2);
+    assert_eq!(leakage.heldout_unique_groups, 2);
+    assert_eq!(leakage.leaked_group_count, 1);
+    assert_eq!(leakage.leaked_keys_sample, vec!["g2".to_string()]);
+    assert!(!leakage.leaked_keys_truncated);
+    assert_eq!(leakage.train_rows, 2);
+    assert_eq!(leakage.heldout_rows, 2);
+    assert_eq!(leakage.rows_with_group, 4);
+    assert_eq!(leakage.rows_missing_group, 0);
+    assert_eq!(leakage.coverage, 1.0);
+}
+
+#[test]
+fn test_group_leakage_works_for_opening_family() {
+    let calibration = vec![obs_with_opening_family("a", "sicilian")];
+    let heldout = vec![obs_with_opening_family("c", "sicilian")];
+    let leakage = group_leakage(&calibration, &heldout, GroupKey::OpeningFamily);
+    assert_eq!(leakage.group_field, "opening_family");
+    assert_eq!(leakage.leaked_group_count, 1);
+    assert_eq!(leakage.leaked_keys_sample, vec!["sicilian".to_string()]);
+    assert_eq!(leakage.coverage, 1.0);
+}
+
+#[test]
+fn test_group_leakage_reports_zero_shared_on_a_clean_split() {
+    let calibration = vec![obs_with_group("a", "g1"), obs_with_group("b", "g2")];
+    let heldout = vec![obs_with_group("c", "g3"), obs_with_group("d", "g4")];
+    let leakage = group_leakage(&calibration, &heldout, GroupKey::SourceRootId);
+    assert_eq!(leakage.leaked_group_count, 0);
+    assert!(leakage.leaked_keys_sample.is_empty());
+    assert_eq!(leakage.rows_missing_group, 0);
+    assert_eq!(leakage.coverage, 1.0);
+}
+
+#[test]
+fn test_group_leakage_counts_rows_missing_the_key_when_all_are_missing() {
+    let calibration = vec![
+        obs_with_group("a", "g1"),
+        Observation {
+            sample_id: "b".into(),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+    ];
+    let heldout = vec![Observation {
+        sample_id: "c".into(),
+        gold_label: Some("win".into()),
+        ..Default::default()
+    }];
+    let leakage = group_leakage(&calibration, &heldout, GroupKey::SourceRootId);
+    assert_eq!(leakage.train_rows, 2);
+    assert_eq!(leakage.heldout_rows, 1);
+    assert_eq!(leakage.rows_with_group, 1, "only 'a' carries a group key");
+    assert_eq!(leakage.rows_missing_group, 2, "'b' and 'c' carry none");
+    // heldout carries zero group keys at all, so no leak could ever be detected regardless of
+    // the training side's coverage -- leaked_group_count must not read as "verified clean".
+    assert_eq!(leakage.heldout_unique_groups, 0);
+    assert_eq!(leakage.leaked_group_count, 0);
+}
+
+#[test]
+fn test_group_leakage_reports_partial_coverage_without_hiding_a_leak() {
+    // Only some rows on each side carry the group key -- the check must still find the leak
+    // among the rows that do, and report the coverage gap rather than silently excluding the
+    // missing rows and calling the result "clean" or "fully checked".
+    let calibration = vec![
+        obs_with_group("a", "shared"),
+        Observation {
+            sample_id: "b".into(),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+    ];
+    let heldout = vec![
+        obs_with_group("c", "shared"),
+        Observation {
+            sample_id: "d".into(),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+    ];
+    let leakage = group_leakage(&calibration, &heldout, GroupKey::SourceRootId);
+    assert_eq!(
+        leakage.leaked_group_count, 1,
+        "the 'shared' group is still found"
+    );
+    assert_eq!(leakage.leaked_keys_sample, vec!["shared".to_string()]);
+    assert_eq!(leakage.train_rows, 2);
+    assert_eq!(leakage.heldout_rows, 2);
+    assert_eq!(leakage.rows_with_group, 2);
+    assert_eq!(leakage.rows_missing_group, 2);
+    assert!((leakage.coverage - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn test_group_leakage_sample_is_sorted_when_under_the_cap() {
+    let calibration: Vec<Observation> = (0..15)
+        .map(|i| obs_with_group(&format!("a{i}"), &format!("g{i:02}")))
+        .collect();
+    let heldout: Vec<Observation> = (0..15)
+        .map(|i| obs_with_group(&format!("h{i}"), &format!("g{i:02}")))
+        .collect();
+    let leakage = group_leakage(&calibration, &heldout, GroupKey::SourceRootId);
+    assert_eq!(leakage.leaked_group_count, 15);
+    assert_eq!(
+        leakage.leaked_keys_sample.len(),
+        15,
+        "well under the 100-key cap, so the sample holds every leaked key"
+    );
+    assert!(!leakage.leaked_keys_truncated);
+    let mut sorted = leakage.leaked_keys_sample.clone();
+    sorted.sort();
+    assert_eq!(
+        leakage.leaked_keys_sample, sorted,
+        "keys should already be sorted"
+    );
+}
+
+#[test]
+fn test_group_leakage_sample_is_capped_and_flagged_truncated_over_the_limit() {
+    // 150 leaked groups, well past MAX_LEAKED_KEYS_SAMPLE (100) -- leaked_group_count must
+    // still report the exact total while leaked_keys_sample stays bounded.
+    let calibration: Vec<Observation> = (0..150)
+        .map(|i| obs_with_group(&format!("a{i}"), &format!("g{i:03}")))
+        .collect();
+    let heldout: Vec<Observation> = (0..150)
+        .map(|i| obs_with_group(&format!("h{i}"), &format!("g{i:03}")))
+        .collect();
+    let leakage = group_leakage(&calibration, &heldout, GroupKey::SourceRootId);
+    assert_eq!(
+        leakage.leaked_group_count, 150,
+        "exact count, unaffected by the cap"
+    );
+    assert_eq!(leakage.leaked_keys_sample.len(), 100);
+    assert!(leakage.leaked_keys_truncated);
+    let mut sorted = leakage.leaked_keys_sample.clone();
+    sorted.sort();
+    assert_eq!(
+        leakage.leaked_keys_sample, sorted,
+        "sample should be a sorted prefix"
+    );
+}
+
+#[test]
+fn test_leaked_group_keys_returns_the_complete_uncapped_list() {
+    let calibration: Vec<Observation> = (0..150)
+        .map(|i| obs_with_group(&format!("a{i}"), &format!("g{i:03}")))
+        .collect();
+    let heldout: Vec<Observation> = (0..150)
+        .map(|i| obs_with_group(&format!("h{i}"), &format!("g{i:03}")))
+        .collect();
+    let all_keys = leaked_group_keys(&calibration, &heldout, GroupKey::SourceRootId);
+    assert_eq!(
+        all_keys.len(),
+        150,
+        "the low-level function has no cap, unlike group_leakage's embedded sample"
+    );
+    let mut sorted = all_keys.clone();
+    sorted.sort();
+    assert_eq!(all_keys, sorted);
+}
+
+#[test]
+fn test_compute_calibration_attaches_leakage_only_with_both_heldout_and_key() {
+    let train = vec![obs_with_group("a", "g1"), obs_with_group("b", "g2")];
+    let heldout = vec![obs_with_group("c", "g2")];
+
+    // No group_by at all: the plain, options-free API is exactly this case.
+    let no_key = compute_calibration(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.5,
+        None,
+        0.40,
+        Some(&heldout),
+    )
+    .unwrap();
+    assert!(no_key.group_leakage.is_none());
+
+    let no_heldout = compute_calibration_with_options(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.5,
+        None,
+        0.40,
+        None,
+        &CalibrationOptions {
+            group_by: Some(GroupKey::SourceRootId),
+        },
+    )
+    .unwrap();
+    assert!(no_heldout.group_leakage.is_none());
+
+    let both = compute_calibration_with_options(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.5,
+        None,
+        0.40,
+        Some(&heldout),
+        &CalibrationOptions {
+            group_by: Some(GroupKey::SourceRootId),
+        },
+    )
+    .unwrap();
+    assert!(both.group_leakage.is_some());
+}
+
+#[test]
+fn test_compute_calibration_note_mentions_leakage_when_groups_are_shared() {
+    let train = vec![obs_with_group("a", "g1"), obs_with_group("b", "g2")];
+    let heldout = vec![obs_with_group("c", "g2")];
+    let result = compute_calibration_with_options(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.5,
+        None,
+        0.40,
+        Some(&heldout),
+        &CalibrationOptions {
+            group_by: Some(GroupKey::SourceRootId),
+        },
+    )
+    .unwrap();
+    let note = result.note.expect("leaked split should attach a note");
+    assert!(
+        note.contains("source_root_id") && note.contains("optimistic"),
+        "note should describe the leakage: {note}"
+    );
+}
+
+#[test]
+fn test_compute_calibration_note_mentions_incomplete_coverage_when_rows_are_missing() {
+    // No group is shared, but neither side has full coverage -- the note must not read as a
+    // clean bill of health, since the leakage check itself only covered part of the data.
+    let train = vec![
+        obs_with_group("a", "g1"),
+        Observation {
+            sample_id: "b".into(),
+            label: Some("win".into()),
+            gold_label: Some("win".into()),
+            ..Default::default()
+        },
+    ];
+    let heldout = vec![obs_with_group("c", "g3")];
+    let result = compute_calibration_with_options(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.5,
+        None,
+        0.40,
+        Some(&heldout),
+        &CalibrationOptions {
+            group_by: Some(GroupKey::SourceRootId),
+        },
+    )
+    .unwrap();
+    assert_eq!(result.group_leakage.as_ref().unwrap().leaked_group_count, 0);
+    let note = result
+        .note
+        .expect("incomplete coverage should attach a note even with no leak found");
+    assert!(
+        note.contains("coverage"),
+        "note should flag the incomplete coverage: {note}"
+    );
+}
+
+#[test]
+fn test_compute_calibration_note_keeps_overfit_sentence_alongside_leakage_sentence() {
+    let make = |id: &str, label: &str, gold: &str, group: &str, n: usize| -> Vec<Observation> {
+        (0..n)
+            .map(|i| Observation {
+                sample_id: id.into(),
+                label: Some(label.into()),
+                gold_label: Some(gold.into()),
+                evaluator_id: Some(format!("e{i}")),
+                source_root_id: Some(group.into()),
+                ..Default::default()
+            })
+            .collect()
+    };
+
+    // Same shape as test_calibrate_heldout_precision_differs_from_training (9/10 correct
+    // stable training vs. 2/10 correct stable heldout -> an overfit gap), plus one group
+    // ("g_shared") shared between a training and a held-out sample -> a leakage overlap too.
+    let mut train = Vec::new();
+    for i in 0..9 {
+        train.extend(make(&format!("t{i}"), "win", "win", &format!("g_t{i}"), 5));
+    }
+    train.extend(make("tw", "loss", "win", "g_shared", 5));
+
+    let mut heldout = Vec::new();
+    heldout.extend(make("h0", "win", "win", "g_shared", 5));
+    heldout.extend(make("h1", "win", "win", "g_h1", 5));
+    for i in 0..8 {
+        heldout.extend(make(
+            &format!("hw{i}"),
+            "loss",
+            "win",
+            &format!("g_hw{i}"),
+            5,
+        ));
+    }
+
+    let result = compute_calibration_with_options(
+        &train,
+        &DecisionScore::Raw,
+        0.95,
+        0.80,
+        None,
+        0.40,
+        Some(&heldout),
+        &CalibrationOptions {
+            group_by: Some(GroupKey::SourceRootId),
+        },
+    )
+    .expect("training should find a threshold meeting 0.80 precision");
+    let note = result
+        .note
+        .expect("both leakage and overfit gap should attach a note");
+    assert!(
+        note.contains("source_root_id") && note.contains("overfit"),
+        "note should combine both sentences: {note}"
     );
 }
 
